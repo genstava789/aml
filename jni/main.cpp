@@ -115,6 +115,7 @@ IsPedPointerValid_fn IsPedPointerValid = nullptr;
 
 typedef void (*CPed_GetBonePosition_fn)(uintptr_t pPed, CVector& outPosn, unsigned int boneTag, bool bCalledFromCamera);
 CPed_GetBonePosition_fn CPed_GetBonePosition = nullptr;
+CPed_GetBonePosition_fn Orig_CPed_GetBonePosition = nullptr;
 
 typedef void (*CCamera_UpdateAimingCoors_fn)(uintptr_t pCamera, const CVector* pNewAimingCoors);
 CCamera_UpdateAimingCoors_fn CCamera_UpdateAimingCoors = nullptr;
@@ -210,18 +211,18 @@ ConfigEntry* entryAimAssist = nullptr;
     static constexpr size_t OFFSET_PED                = 0x0;
     static constexpr size_t OFFSET_MONEY              = 0xB8;
     static constexpr size_t OFFSET_DISPLAY_MONEY      = 0xBC;
-    static constexpr size_t OFFSET_TARGETTED_PED      = 0x7A4;
-    static constexpr size_t OFFSET_TARGETTED_PED_MIN  = 0x798;
-    static constexpr size_t OFFSET_TARGETTED_PED_MAX  = 0x7AC;
+    static constexpr size_t OFFSET_TARGETTED_PED      = 0x79C;
+    static constexpr size_t OFFSET_TARGETTED_PED_MIN  = 0x780;
+    static constexpr size_t OFFSET_TARGETTED_PED_MAX  = 0x7B0;
     static constexpr size_t SIZEOF_CPED               = 0x7A4;
 #else
     static constexpr size_t PLAYER_INFO_SIZE          = 0x1D8;
     static constexpr size_t OFFSET_PED                = 0x0;
     static constexpr size_t OFFSET_MONEY              = 0xF0;
     static constexpr size_t OFFSET_DISPLAY_MONEY      = 0xF4;
-    static constexpr size_t OFFSET_TARGETTED_PED      = 0x988;
-    static constexpr size_t OFFSET_TARGETTED_PED_MIN  = 0x978;
-    static constexpr size_t OFFSET_TARGETTED_PED_MAX  = 0x998;
+    static constexpr size_t OFFSET_TARGETTED_PED      = 0x8E0; // CPed::SetWeaponLockOnTarget: STR pEntLockOnTarget, [this + 0x8E0]
+    static constexpr size_t OFFSET_TARGETTED_PED_MIN  = 0x8D0;
+    static constexpr size_t OFFSET_TARGETTED_PED_MAX  = 0x900;
     static constexpr size_t SIZEOF_CPED               = 0x988;
 #endif
 
@@ -551,14 +552,46 @@ void QueueGodModeCheat()
 }
 
 // -------------------------------------------------------------
-// Aim Assist Headshot (Otomatis Bidik Kepala NPC)
-// Menggunakan CCamera::UpdateAimingCoors & CPed::GetBonePosition
+// Aim Assist Headshot (Otomatis & Instan Alihkan Torso ke Kepala NPC)
+// Berdasarkan analisa IDA Pro:
+// GTA SA secara native memanggil CPed::GetBonePosition dengan boneTag = 3 (Torso)
+// pada CCam::Process_AimWeapon (0x4A63C8) dan CTaskSimpleUseGun::AimGun (0x5DF328).
+// Dengan meng-hook CPed::GetBonePosition, setiap kali game membidik atau menembak
+// ke arah torso NPC (baik lewat tap touchscreen maupun joystick/gamepad),
+// koordinat sasaran dialihkan SECARA INSTAN ke BONE_HEAD (8)!
 // -------------------------------------------------------------
+void Hooked_CPed_GetBonePosition(uintptr_t pPed, CVector& outPosn, unsigned int boneTag, bool bCalledFromCamera)
+{
+    if (bAimAssistHead && pPed != 0)
+    {
+        uintptr_t localPlayer = GetLocalPlayerPtr();
+        uintptr_t playerPed = 0;
+        if (localPlayer) playerPed = *(uintptr_t*)(localPlayer + OFFSET_PED);
+
+        // Hanya modifikasi jika ped ini BUKAN player (CJ) itu sendiri
+        if (pPed != playerPed)
+        {
+            // GTA SA secara default selalu meminta koordinat torso (bone 3) atau pelvis/spine/neck (bone 1-5)
+            // saat lock-on aiming (tap touchscreen atau gamepad/joystick) dan perhitungan peluru.
+            // Alihkan koordinat sasaran secara instan ke BONE_HEAD (8)!
+            if (boneTag >= 1 && boneTag <= 5)
+            {
+                boneTag = 8; // BONE_HEAD
+            }
+        }
+    }
+
+    if (Orig_CPed_GetBonePosition)
+    {
+        Orig_CPed_GetBonePosition(pPed, outPosn, boneTag, bCalledFromCamera);
+    }
+}
+
 uintptr_t GetPlayerTargetedPed(uintptr_t playerPed)
 {
     if (!playerPed) return 0;
 
-    // Cek offset targetted ped standar
+    // Cek offset targetted ped terkonfirmasi dari analisa IDA Pro (0x8E0 pada ARM64)
     uintptr_t candidate = *(uintptr_t*)(playerPed + OFFSET_TARGETTED_PED);
     if (candidate > 0x100000 && candidate != playerPed)
     {
@@ -586,7 +619,10 @@ uintptr_t GetPlayerTargetedPed(uintptr_t playerPed)
 
 uintptr_t FindClosestPedToPoint(const CVector& point, uintptr_t ignorePed, float maxDistance)
 {
-    if (!pPedPoolPtr || !*pPedPoolPtr || !CPed_GetBonePosition) return 0;
+    if (!pPedPoolPtr || !*pPedPoolPtr) return 0;
+    CPed_GetBonePosition_fn getBone = Orig_CPed_GetBonePosition ? Orig_CPed_GetBonePosition : CPed_GetBonePosition;
+    if (!getBone) return 0;
+
     CPoolGeneric* pool = *pPedPoolPtr;
     if (!pool || !pool->m_pObjects || !pool->m_byteMap || pool->m_nSize <= 0 || pool->m_nSize > 500) return 0;
 
@@ -602,7 +638,7 @@ uintptr_t FindClosestPedToPoint(const CVector& point, uintptr_t ignorePed, float
         if (IsPedPointerValid && !IsPedPointerValid((void*)ped)) continue;
 
         CVector head(0.0f, 0.0f, 0.0f);
-        CPed_GetBonePosition(ped, head, 8, false); // 8 = BONE_HEAD
+        getBone(ped, head, 8, false); // 8 = BONE_HEAD
         if (head.x == 0.0f && head.y == 0.0f && head.z == 0.0f) continue;
 
         float d = GetDistance3D(head, point);
@@ -637,20 +673,22 @@ void Hooked_CCamera_UpdateAimingCoors(uintptr_t camera, const CVector* pNewAimin
         return;
     }
 
-    // 1. Dapatkan NPC yang sedang dibidik / dikunci oleh pemain
+    CPed_GetBonePosition_fn getBone = Orig_CPed_GetBonePosition ? Orig_CPed_GetBonePosition : CPed_GetBonePosition;
+
+    // 1. Dapatkan NPC yang sedang dibidik / dikunci oleh pemain (Touch Tap atau Controller Lock-on)
     uintptr_t targetPed = GetPlayerTargetedPed(playerPed);
 
-    // 2. Jika tidak terkunci otomatis, cari NPC terdekat dari titik bidikan crosshair
-    if (!targetPed && pPedPoolPtr && *pPedPoolPtr && CPed_GetBonePosition)
+    // 2. Jika tidak terkunci otomatis (free-aim), cari NPC terdekat dari titik bidikan crosshair
+    if (!targetPed && pPedPoolPtr && *pPedPoolPtr && getBone)
     {
-        targetPed = FindClosestPedToPoint(*pNewAimingCoors, playerPed, 3.5f);
+        targetPed = FindClosestPedToPoint(*pNewAimingCoors, playerPed, 5.0f);
     }
 
     // 3. Alihkan koordinat bidikan kamera langsung ke kepala NPC (Bone 8: BONE_HEAD)
-    if (targetPed && CPed_GetBonePosition)
+    if (targetPed && getBone)
     {
         CVector headPos(0.0f, 0.0f, 0.0f);
-        CPed_GetBonePosition(targetPed, headPos, 8, false); // Bone 8 = BONE_HEAD
+        getBone(targetPed, headPos, 8, false); // Bone 8 = BONE_HEAD
 
         if (headPos.x != 0.0f || headPos.y != 0.0f || headPos.z != 0.0f)
         {
@@ -1961,8 +1999,30 @@ extern "C" void OnModLoad()
 
     // Resolusi symbol untuk Aim Assist Head
     IsPedPointerValid = (IsPedPointerValid_fn)aml->GetSym(pGTASA, "_Z17IsPedPointerValidP4CPed");
-    CPed_GetBonePosition = (CPed_GetBonePosition_fn)aml->GetSym(pGTASA, "_ZN4CPed15GetBonePositionER5RwV3djb");
-    pPedPoolPtr = (CPoolGeneric**)aml->GetSym(pGTASA, "_ZN6CPools10ms_pPedPoolE");
+
+    // ms_pPedPool (11 letters: _ZN6CPools11ms_pPedPoolE)
+    pPedPoolPtr = (CPoolGeneric**)aml->GetSym(pGTASA, "_ZN6CPools11ms_pPedPoolE");
+    if (!pPedPoolPtr) pPedPoolPtr = (CPoolGeneric**)aml->GetSym(pGTASA, "_ZN6CPools10ms_pPedPoolE");
+
+    uintptr_t pGetBonePos = aml->GetSym(pGTASA, "_ZN4CPed15GetBonePositionER5RwV3djb");
+    if (!pGetBonePos)
+    {
+        #if defined(AML32) || defined(__arm__) || !defined(__LP64__)
+            pGetBonePos = pGTASA + 0x44439C;
+        #else
+            pGetBonePos = pGTASA + 0x59AEE4; // IDA Pro offset pada ARM64
+        #endif
+    }
+    if (pGetBonePos)
+    {
+        aml->Hook((void*)pGetBonePos, (void*)Hooked_CPed_GetBonePosition, (void**)&Orig_CPed_GetBonePosition);
+        CPed_GetBonePosition = (CPed_GetBonePosition_fn)pGetBonePos;
+        logger->Info("Hook CPed::GetBonePosition (_ZN4CPed15GetBonePositionER5RwV3djb) berhasil! Torso->Head auto-redirect aktif.");
+    }
+    else
+    {
+        logger->Error("Symbol CPed::GetBonePosition tidak ditemukan di libGTASA.so!");
+    }
 
     uintptr_t pUpdateAimingCoors = aml->GetSym(pGTASA, "_ZN7CCamera17UpdateAimingCoorsERK7CVector");
     if (pUpdateAimingCoors)
