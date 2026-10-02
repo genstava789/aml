@@ -120,10 +120,6 @@ CPed_GetBonePosition_fn Orig_CPed_GetBonePosition = nullptr;
 typedef bool (*CPed_IsAlive_fn)(uintptr_t pPed);
 CPed_IsAlive_fn CPed_IsAlive = nullptr;
 
-typedef void (*CCam_Process_AimWeapon_fn)(uintptr_t cam, const CVector& targetSource, float a3, float a4, float a5);
-CCam_Process_AimWeapon_fn CCam_Process_AimWeapon = nullptr;
-CCam_Process_AimWeapon_fn Orig_CCam_Process_AimWeapon = nullptr;
-
 typedef void (*CPedIK_PointGunAtPosition_fn)(uintptr_t thisIK, const CVector& pos, float factor);
 CPedIK_PointGunAtPosition_fn CPedIK_PointGunAtPosition = nullptr;
 CPedIK_PointGunAtPosition_fn Orig_CPedIK_PointGunAtPosition = nullptr;
@@ -131,10 +127,6 @@ CPedIK_PointGunAtPosition_fn Orig_CPedIK_PointGunAtPosition = nullptr;
 typedef bool (*CWeapon_Fire_fn)(uintptr_t thisWeapon, uintptr_t pFiringEntity, CVector* pSource, CVector* pTarget, uintptr_t pTargetEntity, CVector* a6, CVector* a7);
 CWeapon_Fire_fn CWeapon_Fire = nullptr;
 CWeapon_Fire_fn Orig_CWeapon_Fire = nullptr;
-
-typedef void (*CCamera_UpdateAimingCoors_fn)(uintptr_t pCamera, const CVector* pNewAimingCoors);
-CCamera_UpdateAimingCoors_fn CCamera_UpdateAimingCoors = nullptr;
-CCamera_UpdateAimingCoors_fn Orig_CCamera_UpdateAimingCoors = nullptr;
 
 CPoolGeneric** pPedPoolPtr = nullptr;
 
@@ -569,39 +561,28 @@ void QueueGodModeCheat()
 // -------------------------------------------------------------
 // Aim Assist Headshot (Otomatis & Instan Alihkan Torso ke Kepala NPC)
 // Berdasarkan analisa mendalam IDA Pro:
-// 1. Hook CPed::GetBonePosition: memastikan setiap query torso (bone 1-5) menjadi BONE_HEAD (8).
-// 2. Hook CCam::Process_AimWeapon: menimpa m_fVerticalAngle (0x84) dan m_fHorizontalAngle (0x94)
-//    secara LANGSUNG & INSTAN ke kepala NPC hidup terdekat atau yang sedang dikunci,
-//    sehingga crosshair seketika melompat ke kepala tanpa delay dan tanpa turun ke torso!
-// 3. Hook CPedIK::PointGunAtPosition: moncong senjata dan tangan CJ selalu membidik ke kepala.
-// 4. Hook CWeapon::Fire: sasaran peluru dipastikan 100% tepat menembus kepala (headshot kill).
-// 5. Target Auto-Switch: Ketika musuh mati, sistem otomatis mendeteksi status IsAlive == false
-//    dan seketika memindahkan bidikan ke KEPALA musuh hidup berikutnya!
+// 1. Hook CPed::GetBonePosition:
+//    - Alihkan setiap query torso (bone 1-5) menjadi BONE_HEAD (8) untuk NPC musuh hidup.
+//    - Jika dipanggil dari CCam::Process_AimWeapon (bCalledFromCamera == true), berikan
+//      kompensasi elevasi Z (+0.38f) untuk menetralkan offset depresi kamera bawaan (FSUB S10, S10, S1),
+//      sehingga crosshair kamera bertengger tepat di kepala tanpa memanipulasi sudut kamera secara paksa!
+//    - Jika dipanggil dari sistem tembak tanpa bidik (hip-fire), sistem target bawaan game berjalan
+//      100% natural dan lancar, namun moncong senjata dan peluru tetap otomatis mengunci kepala!
+// 2. Hook CPedIK::PointGunAtPosition:
+//    - Memastikan arah angkat senjata CJ selalu tegak lurus mengarah ke kepala target.
+// 3. Hook CWeapon::Fire:
+//    - Memastikan trajektori peluru 100% tepat menembus kepala target yang sedang dikunci.
+// 4. Target Auto-Switch & Crosshair:
+//    - Tidak menyentuh CCamera::UpdateAimingCoors agar crosshair free-aim TIDAK hilang pada senjata apapun.
+//    - Mengabaikan target yang sudah mati (IsPedAliveSafe == false) sehingga aim seketika berpindah
+//      ke kepala musuh hidup berikutnya.
 // -------------------------------------------------------------
-void Hooked_CPed_GetBonePosition(uintptr_t pPed, CVector& outPosn, unsigned int boneTag, bool bCalledFromCamera)
+inline bool IsPedAliveSafe(uintptr_t ped)
 {
-    if (bAimAssistHead && pPed != 0)
-    {
-        uintptr_t localPlayer = GetLocalPlayerPtr();
-        uintptr_t playerPed = localPlayer ? *(uintptr_t*)(localPlayer + OFFSET_PED) : 0;
-
-        // Hanya modifikasi jika ped ini BUKAN player (CJ) itu sendiri
-        if (pPed != playerPed)
-        {
-            // GTA SA secara default selalu meminta koordinat torso (bone 3) atau pelvis/spine/neck (bone 1-5)
-            // saat lock-on aiming (tap touchscreen atau gamepad/joystick) dan perhitungan peluru.
-            // Alihkan koordinat sasaran secara instan ke BONE_HEAD (8)!
-            if (boneTag >= 1 && boneTag <= 5)
-            {
-                boneTag = 8; // BONE_HEAD
-            }
-        }
-    }
-
-    if (Orig_CPed_GetBonePosition)
-    {
-        Orig_CPed_GetBonePosition(pPed, outPosn, boneTag, bCalledFromCamera);
-    }
+    if (!ped || ped < 0x100000) return false;
+    if (IsPedPointerValid && !IsPedPointerValid((void*)ped)) return false;
+    if (CPed_IsAlive) return CPed_IsAlive(ped);
+    return true;
 }
 
 uintptr_t GetPlayerTargetedPed(uintptr_t playerPed)
@@ -612,7 +593,7 @@ uintptr_t GetPlayerTargetedPed(uintptr_t playerPed)
     uintptr_t candidate = *(uintptr_t*)(playerPed + OFFSET_TARGETTED_PED);
     if (candidate > 0x100000 && candidate != playerPed)
     {
-        if (!IsPedPointerValid || IsPedPointerValid((void*)candidate))
+        if (IsPedAliveSafe(candidate))
         {
             return candidate;
         }
@@ -624,7 +605,7 @@ uintptr_t GetPlayerTargetedPed(uintptr_t playerPed)
         for (size_t off = OFFSET_TARGETTED_PED_MIN; off <= OFFSET_TARGETTED_PED_MAX; off += sizeof(void*))
         {
             uintptr_t c = *(uintptr_t*)(playerPed + off);
-            if (c > 0x100000 && c != playerPed && IsPedPointerValid((void*)c))
+            if (c > 0x100000 && c != playerPed && IsPedAliveSafe(c))
             {
                 return c;
             }
@@ -634,150 +615,45 @@ uintptr_t GetPlayerTargetedPed(uintptr_t playerPed)
     return 0;
 }
 
-uintptr_t FindBestAliveTargetForAim(uintptr_t playerPed, const CVector& camSource, const CVector& camFront)
+void Hooked_CPed_GetBonePosition(uintptr_t pPed, CVector& outPosn, unsigned int boneTag, bool bCalledFromCamera)
 {
-    // 1. Cek target resmi yang sedang dikunci
-    uintptr_t target = GetPlayerTargetedPed(playerPed);
-    if (target)
+    bool bRedirectHead = false;
+    if (bAimAssistHead && pPed != 0)
     {
-        if (!CPed_IsAlive || CPed_IsAlive(target))
+        uintptr_t localPlayer = GetLocalPlayerPtr();
+        uintptr_t playerPed = localPlayer ? *(uintptr_t*)(localPlayer + OFFSET_PED) : 0;
+
+        // Hanya modifikasi jika ped ini BUKAN player (CJ) itu sendiri dan ped masih hidup
+        if (pPed != playerPed && IsPedAliveSafe(pPed))
         {
-            return target;
-        }
-    }
-
-    // 2. Jika tidak ada lock-on atau musuh sudah mati, scan NPC hidup terdekat dari arah bidikan crosshair
-    if (!pPedPoolPtr || !*pPedPoolPtr) return 0;
-    CPed_GetBonePosition_fn getBone = Orig_CPed_GetBonePosition ? Orig_CPed_GetBonePosition : CPed_GetBonePosition;
-    if (!getBone) return 0;
-
-    CPoolGeneric* pool = *pPedPoolPtr;
-    if (!pool || !pool->m_pObjects || !pool->m_byteMap || pool->m_nSize <= 0 || pool->m_nSize > 500) return 0;
-
-    uintptr_t bestPed = 0;
-    float bestPerpDist = 4.5f; // toleransi radius bidik mencakup torso, badan, dan sekitarnya
-
-    for (int i = 0; i < pool->m_nSize; ++i)
-    {
-        if (pool->m_byteMap[i] & 0x80) continue; // slot kosong
-
-        uintptr_t ped = (uintptr_t)pool->m_pObjects + (i * SIZEOF_CPED);
-        if (ped == playerPed || ped < 0x100000) continue;
-        if (IsPedPointerValid && !IsPedPointerValid((void*)ped)) continue;
-        if (CPed_IsAlive && !CPed_IsAlive(ped)) continue; // Abaikan NPC yang sudah mati!
-
-        CVector head(0.0f, 0.0f, 0.0f);
-        getBone(ped, head, 8, false); // 8 = BONE_HEAD
-        if (head.x == 0.0f && head.y == 0.0f && head.z == 0.0f) continue;
-
-        // Vektor dari kamera ke kepala NPC
-        float vx = head.x - camSource.x;
-        float vy = head.y - camSource.y;
-        float vz = head.z - camSource.z;
-
-        // Proyeksi jarak di depan kamera
-        float t = vx * camFront.x + vy * camFront.y + vz * camFront.z;
-        if (t < 0.5f || t > 75.0f) continue; // Rentang jarak 0.5m s/d 75m di depan kamera
-
-        // Titik proyeksi pada garis bidik crosshair
-        float rx = camSource.x + camFront.x * t;
-        float ry = camSource.y + camFront.y * t;
-        float rz = camSource.z + camFront.z * t;
-
-        // Jarak tegak lurus dari garis bidik ke kepala NPC
-        float perp = sqrtf((head.x - rx) * (head.x - rx) +
-                           (head.y - ry) * (head.y - ry) +
-                           (head.z - rz) * (head.z - rz));
-
-        if (perp < bestPerpDist)
-        {
-            bestPerpDist = perp;
-            bestPed = ped;
-        }
-    }
-
-    return bestPed;
-}
-
-uintptr_t FindClosestPedToPoint(const CVector& point, uintptr_t ignorePed, float maxDistance)
-{
-    if (!pPedPoolPtr || !*pPedPoolPtr) return 0;
-    CPed_GetBonePosition_fn getBone = Orig_CPed_GetBonePosition ? Orig_CPed_GetBonePosition : CPed_GetBonePosition;
-    if (!getBone) return 0;
-
-    CPoolGeneric* pool = *pPedPoolPtr;
-    if (!pool || !pool->m_pObjects || !pool->m_byteMap || pool->m_nSize <= 0 || pool->m_nSize > 500) return 0;
-
-    uintptr_t bestPed = 0;
-    float bestDist = maxDistance;
-
-    for (int i = 0; i < pool->m_nSize; ++i)
-    {
-        if (pool->m_byteMap[i] & 0x80) continue; // slot kosong
-
-        uintptr_t ped = (uintptr_t)pool->m_pObjects + (i * SIZEOF_CPED);
-        if (ped == ignorePed || ped < 0x100000) continue;
-        if (IsPedPointerValid && !IsPedPointerValid((void*)ped)) continue;
-        if (CPed_IsAlive && !CPed_IsAlive(ped)) continue; // Abaikan yang sudah mati
-
-        CVector head(0.0f, 0.0f, 0.0f);
-        getBone(ped, head, 8, false); // 8 = BONE_HEAD
-        if (head.x == 0.0f && head.y == 0.0f && head.z == 0.0f) continue;
-
-        float d = GetDistance3D(head, point);
-        if (d < bestDist)
-        {
-            bestDist = d;
-            bestPed = ped;
-        }
-    }
-    return bestPed;
-}
-
-void Hooked_CCam_Process_AimWeapon(uintptr_t cam, const CVector& targetSource, float a3, float a4, float a5)
-{
-    if (Orig_CCam_Process_AimWeapon)
-    {
-        Orig_CCam_Process_AimWeapon(cam, targetSource, a3, a4, a5);
-    }
-
-    if (!bAimAssistHead || !IsPlayerInGame()) return;
-
-    uintptr_t localPlayer = GetLocalPlayerPtr();
-    if (!localPlayer) return;
-    uintptr_t playerPed = *(uintptr_t*)(localPlayer + OFFSET_PED);
-    if (!playerPed) return;
-
-    CVector camSource = *(CVector*)(cam + 0x168); // m_vecSource of CCam
-    CVector camFront  = *(CVector*)(cam + 0x174); // m_vecFront of CCam
-
-    uintptr_t targetPed = FindBestAliveTargetForAim(playerPed, camSource, camFront);
-    if (targetPed)
-    {
-        CPed_GetBonePosition_fn getBone = Orig_CPed_GetBonePosition ? Orig_CPed_GetBonePosition : CPed_GetBonePosition;
-        if (getBone)
-        {
-            CVector headPos(0.0f, 0.0f, 0.0f);
-            getBone(targetPed, headPos, 8, false); // 8 = BONE_HEAD
-
-            if (headPos.x != 0.0f || headPos.y != 0.0f || headPos.z != 0.0f)
+            // GTA SA secara default selalu meminta koordinat torso (bone 3) atau pelvis/spine/neck (bone 1-5)
+            // saat lock-on aiming (touch tap atau gamepad/joystick) dan perhitungan tembakan (termasuk hip-fire).
+            // Alihkan koordinat sasaran secara instan ke BONE_HEAD (8)!
+            if (boneTag >= 1 && boneTag <= 5)
             {
-                float dx = headPos.x - camSource.x;
-                float dy = headPos.y - camSource.y;
-                float dz = headPos.z - camSource.z;
-                float dist2D = sqrtf(dx * dx + dy * dy);
-
-                if (dist2D > 0.001f)
-                {
-                    float targetYaw = atan2f(-dx, dy);
-                    float targetPitch = atan2f(dz, dist2D);
-
-                    // Timpa sudut kamera m_fVerticalAngle dan m_fHorizontalAngle SECARA INSTAN!
-                    // Ini membuat crosshair di layar LANGSUNG terkunci di kepala musuh tanpa delay dan tanpa turun ke torso!
-                    *(float*)(cam + 0x84) = targetPitch; // m_fVerticalAngle (Pitch)
-                    *(float*)(cam + 0x94) = targetYaw;   // m_fHorizontalAngle (Yaw)
-                }
+                boneTag = 8; // BONE_HEAD
+                bRedirectHead = true;
             }
+        }
+    }
+
+    if (Orig_CPed_GetBonePosition)
+    {
+        Orig_CPed_GetBonePosition(pPed, outPosn, boneTag, bCalledFromCamera);
+    }
+
+    // Kompensasi elevasi kamera pada CCam::Process_AimWeapon:
+    // Game secara bawaan menundukkan sudut kamera sebesar ~3-4 derajat ke bawah (ke arah dada/torso)
+    // dengan instruksi FSUB S10, S10, S1.
+    // Jika panggilan berasal dari kamera (bCalledFromCamera == true) untuk membidik kepala musuh,
+    // kita tambahkan offset Z (+0.38f) sehingga crosshair di layar bertengger tepat di kepala target!
+    if (bAimAssistHead && (boneTag == 8 || bRedirectHead) && bCalledFromCamera && pPed != 0)
+    {
+        uintptr_t localPlayer = GetLocalPlayerPtr();
+        uintptr_t playerPed = localPlayer ? *(uintptr_t*)(localPlayer + OFFSET_PED) : 0;
+        if (pPed != playerPed && IsPedAliveSafe(pPed))
+        {
+            outPosn.z += 0.38f;
         }
     }
 }
@@ -801,15 +677,6 @@ void Hooked_CPedIK_PointGunAtPosition(uintptr_t thisIK, const CVector& pos, floa
                 if (thisIK == playerIK)
                 {
                     uintptr_t targetPed = GetPlayerTargetedPed(playerPed);
-                    if (targetPed && CPed_IsAlive && !CPed_IsAlive(targetPed))
-                    {
-                        targetPed = 0;
-                    }
-                    if (!targetPed && pPedPoolPtr && *pPedPoolPtr)
-                    {
-                        targetPed = FindClosestPedToPoint(pos, playerPed, 5.0f);
-                    }
-
                     if (targetPed)
                     {
                         CPed_GetBonePosition_fn getBone = Orig_CPed_GetBonePosition ? Orig_CPed_GetBonePosition : CPed_GetBonePosition;
@@ -848,17 +715,12 @@ bool Hooked_CWeapon_Fire(uintptr_t thisWeapon, uintptr_t pFiringEntity, CVector*
         if (pFiringEntity == playerPed)
         {
             uintptr_t target = pTargetEntity;
-            if (!target) target = GetPlayerTargetedPed(playerPed);
-            if (target && CPed_IsAlive && !CPed_IsAlive(target))
+            if (!target || !IsPedAliveSafe(target))
             {
-                target = 0;
-            }
-            if (!target && pTarget && pPedPoolPtr && *pPedPoolPtr)
-            {
-                target = FindClosestPedToPoint(*pTarget, playerPed, 5.0f);
+                target = GetPlayerTargetedPed(playerPed);
             }
 
-            if (target)
+            if (target && IsPedAliveSafe(target))
             {
                 CPed_GetBonePosition_fn getBone = Orig_CPed_GetBonePosition ? Orig_CPed_GetBonePosition : CPed_GetBonePosition;
                 if (getBone)
@@ -882,65 +744,6 @@ bool Hooked_CWeapon_Fire(uintptr_t thisWeapon, uintptr_t pFiringEntity, CVector*
         return Orig_CWeapon_Fire(thisWeapon, pFiringEntity, pSource, pTarget, pTargetEntity, a6, a7);
     }
     return false;
-}
-
-void Hooked_CCamera_UpdateAimingCoors(uintptr_t camera, const CVector* pNewAimingCoors)
-{
-    if (!bAimAssistHead || !pNewAimingCoors || !IsPlayerInGame())
-    {
-        if (Orig_CCamera_UpdateAimingCoors) Orig_CCamera_UpdateAimingCoors(camera, pNewAimingCoors);
-        return;
-    }
-
-    uintptr_t localPlayer = GetLocalPlayerPtr();
-    if (!localPlayer)
-    {
-        if (Orig_CCamera_UpdateAimingCoors) Orig_CCamera_UpdateAimingCoors(camera, pNewAimingCoors);
-        return;
-    }
-
-    uintptr_t playerPed = *(uintptr_t*)(localPlayer + OFFSET_PED);
-    if (!playerPed)
-    {
-        if (Orig_CCamera_UpdateAimingCoors) Orig_CCamera_UpdateAimingCoors(camera, pNewAimingCoors);
-        return;
-    }
-
-    CPed_GetBonePosition_fn getBone = Orig_CPed_GetBonePosition ? Orig_CPed_GetBonePosition : CPed_GetBonePosition;
-
-    // 1. Dapatkan NPC yang sedang dibidik / dikunci oleh pemain (Touch Tap atau Controller Lock-on)
-    uintptr_t targetPed = GetPlayerTargetedPed(playerPed);
-    if (targetPed && CPed_IsAlive && !CPed_IsAlive(targetPed))
-    {
-        targetPed = 0;
-    }
-
-    // 2. Jika tidak terkunci otomatis (free-aim), cari NPC terdekat dari titik bidikan crosshair
-    if (!targetPed && pPedPoolPtr && *pPedPoolPtr && getBone)
-    {
-        targetPed = FindClosestPedToPoint(*pNewAimingCoors, playerPed, 5.0f);
-    }
-
-    // 3. Alihkan koordinat bidikan kamera langsung ke kepala NPC (Bone 8: BONE_HEAD)
-    if (targetPed && getBone)
-    {
-        CVector headPos(0.0f, 0.0f, 0.0f);
-        getBone(targetPed, headPos, 8, false); // Bone 8 = BONE_HEAD
-
-        if (headPos.x != 0.0f || headPos.y != 0.0f || headPos.z != 0.0f)
-        {
-            if (Orig_CCamera_UpdateAimingCoors)
-            {
-                Orig_CCamera_UpdateAimingCoors(camera, &headPos);
-                return;
-            }
-        }
-    }
-
-    if (Orig_CCamera_UpdateAimingCoors)
-    {
-        Orig_CCamera_UpdateAimingCoors(camera, pNewAimingCoors);
-    }
 }
 
 // -------------------------------------------------------------
@@ -2269,19 +2072,6 @@ extern "C" void OnModLoad()
         logger->Error("Symbol CPed::GetBonePosition tidak ditemukan di libGTASA.so!");
     }
 
-    uintptr_t pProcessAimWeapon = aml->GetSym(pGTASA, "_ZN4CCam17Process_AimWeaponERK7CVectorfff");
-    if (!pProcessAimWeapon)
-    {
-        #if !defined(AML32) && !defined(__arm__) && defined(__LP64__)
-            pProcessAimWeapon = pGTASA + 0x4A5B04; // IDA Pro offset ARM64
-        #endif
-    }
-    if (pProcessAimWeapon)
-    {
-        aml->Hook((void*)pProcessAimWeapon, (void*)Hooked_CCam_Process_AimWeapon, (void**)&Orig_CCam_Process_AimWeapon);
-        logger->Info("Hook CCam::Process_AimWeapon (_ZN4CCam17Process_AimWeaponERK7CVectorfff) berhasil! Instant Head Snap aktif.");
-    }
-
     uintptr_t pPointGunAtPos = aml->GetSym(pGTASA, "_ZN6CPedIK18PointGunAtPositionERK7CVectorf");
     if (!pPointGunAtPos)
     {
@@ -2306,17 +2096,6 @@ extern "C" void OnModLoad()
     {
         aml->Hook((void*)pWeaponFire, (void*)Hooked_CWeapon_Fire, (void**)&Orig_CWeapon_Fire);
         logger->Info("Hook CWeapon::Fire (_ZN7CWeapon4FireEP7CEntityP7CVectorS3_S1_S3_S3_) berhasil! 100%% Headshot aktif.");
-    }
-
-    uintptr_t pUpdateAimingCoors = aml->GetSym(pGTASA, "_ZN7CCamera17UpdateAimingCoorsERK7CVector");
-    if (pUpdateAimingCoors)
-    {
-        aml->Hook((void*)pUpdateAimingCoors, (void*)Hooked_CCamera_UpdateAimingCoors, (void**)&Orig_CCamera_UpdateAimingCoors);
-        logger->Info("Hook CCamera::UpdateAimingCoors (_ZN7CCamera17UpdateAimingCoorsERK7CVector) berhasil!");
-    }
-    else
-    {
-        logger->Error("Symbol CCamera::UpdateAimingCoors tidak ditemukan di libGTASA.so!");
     }
 
     if (pRsGlobal && pRsGlobal->maximumWidth > 0)
