@@ -2,6 +2,8 @@
 #include <mod/logger.h>
 #include <mod/config.h>
 #include "iimgui.h"
+#include <algorithm>
+#include <string.h>
 
 MYMOD(com.example.infinitemoney, Infinite Money Mod, 1.3, YourName)
 NEEDGAME(com.rockstargames.gtasa)
@@ -45,6 +47,9 @@ void (*AND_TouchEvent)(int actionType, int trackNum, int x, int y) = nullptr;
 
 typedef void* (*FindPlayerPed_fn)(int);
 FindPlayerPed_fn FindPlayerPed = nullptr;
+
+typedef void (*CCheat_MoneyArmourHealthCheat_fn)();
+CCheat_MoneyArmourHealthCheat_fn CCheat_MoneyArmourHealthCheat = nullptr;
 
 typedef void (*CSprite2d_DrawRect_fn)(const CRect&, const CRGBA&);
 CSprite2d_DrawRect_fn CSprite2d_DrawRect = nullptr;
@@ -95,8 +100,16 @@ bool bForceExactMoney = false;      // Selalu paksa uang tepat sebesar targetMon
 bool bHasLoggedThisSession = false;
 
 // Native Floating CLEO-style Menu State
+enum NativeMenuScreen {
+    SCREEN_MAIN_MENU = 0,
+    SCREEN_MANUAL_SET_MONEY = 1
+};
+
 bool bNativeMenuOpen = false;
+NativeMenuScreen g_CurrentMenuScreen = SCREEN_MAIN_MENU;
 int g_PressedItem = -1;
+int g_MenuPage = 0;
+int64_t g_ManualInputMoney = 2000000;
 char g_FeedbackMsg[80] = "";
 int32_t g_FeedbackTimer = 0;
 
@@ -247,6 +260,89 @@ void DrawTextAt(float x, float y, const char* text, float scale, const CRGBA& co
 }
 
 // -------------------------------------------------------------
+// Helper Format Nominal Uang & Eksekusi Cheat
+// -------------------------------------------------------------
+inline void FormatMoneyNumber(int64_t amount, char* out, size_t outSize)
+{
+    if (amount <= 0)
+    {
+        snprintf(out, outSize, "$ 0");
+        return;
+    }
+    char raw[32];
+    snprintf(raw, sizeof(raw), "%lld", (long long)amount);
+    int len = (int)strlen(raw);
+
+    char formatted[48];
+    int fIdx = 0;
+    formatted[fIdx++] = '$';
+    formatted[fIdx++] = ' ';
+
+    for (int i = 0; i < len; ++i)
+    {
+        if (i > 0 && (len - i) % 3 == 0)
+        {
+            formatted[fIdx++] = '.';
+        }
+        formatted[fIdx++] = raw[i];
+    }
+    formatted[fIdx] = '\0';
+    snprintf(out, outSize, "%s", formatted);
+}
+
+void TriggerOfficialCheat()
+{
+    if (CCheat_MoneyArmourHealthCheat)
+    {
+        CCheat_MoneyArmourHealthCheat();
+        SetFeedback(">> Cheat Resmi Aktif: Health, Armor & Uang!");
+        logger->Info("Cheat resmi CCheat::MoneyArmourHealthCheat diaktifkan.");
+    }
+    else
+    {
+        if (IsPlayerInGame())
+        {
+            int32_t cur = GetCurrentPlayerMoney();
+            int32_t next = cur + 250000;
+            SetPlayerMoneyDirect(next);
+            if (targetMoney < next) targetMoney = next;
+            SetFeedback(">> Cheat Aktif: Uang +$250.000 (Fallback)!");
+        }
+        else
+        {
+            SetFeedback(">> Gagal: Player belum di dalam gameplay!");
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// Definisi Menu Utama Bersih (Hanya 2 Fitur Utama + Tutup)
+// -------------------------------------------------------------
+struct MainMenuItemDef
+{
+    const char* label;
+    int actionId;
+    CRGBA bgColor;
+    CRGBA borderColor;
+    CRGBA textColor;
+};
+
+enum MainMenuAction
+{
+    ACTION_OPEN_SET_MONEY = 1,
+    ACTION_TRIGGER_OFFICIAL_CHEAT = 2,
+    ACTION_CLOSE_MENU = 3
+};
+
+const MainMenuItemDef g_MainMenuItems[] = {
+    { "[1] SET UANG (INPUT MANUAL NOMINAL)", ACTION_OPEN_SET_MONEY,         CRGBA(25, 40, 60, 235), CRGBA(255, 215, 0, 230), CRGBA(255, 235, 120, 255) },
+    { "[2] CHEAT RESMI: HEALTH, ARMOR & UANG", ACTION_TRIGGER_OFFICIAL_CHEAT, CRGBA(20, 50, 32, 235), CRGBA(60, 225, 105, 230), CRGBA(140, 255, 160, 255) },
+    { "[X] TUTUP MENU",                       ACTION_CLOSE_MENU,             CRGBA(55, 22, 22, 235), CRGBA(225, 70, 70, 230), CRGBA(255, 130, 130, 255) }
+};
+const int TOTAL_MENU_ITEMS = sizeof(g_MainMenuItems) / sizeof(g_MainMenuItems[0]);
+const int MAX_ITEMS_PER_PAGE = 10; // Mendukung pagination otomatis jika menu melebihi 10 item!
+
+// -------------------------------------------------------------
 // Native Floating Mod Menu Render & Layout
 // -------------------------------------------------------------
 void DrawNativeFloatingMenu()
@@ -254,10 +350,9 @@ void DrawNativeFloatingMenu()
     if (!CSprite2d_DrawRect || !CFont_PrintString) return;
 
     // HANYA GAMBAR JIKA PLAYER SUDAH DI DALAM GAMEPLAY!
-    // Ini mencegah crash saat di layar FrontendIdle / Main Menu / Loading!
+    // Mencegah crash saat di layar FrontendIdle / Main Menu / Loading!
     if (!IsPlayerInGame()) return;
 
-    // Perbarui resolusi layar dari RsGlobal jika tersedia
     if (pRsGlobal && pRsGlobal->maximumWidth > 0 && pRsGlobal->maximumHeight > 0)
     {
         g_ScreenWidth = (float)pRsGlobal->maximumWidth;
@@ -267,95 +362,251 @@ void DrawNativeFloatingMenu()
     bool inGame = IsPlayerInGame();
     int32_t curMoney = inGame ? GetCurrentPlayerMoney() : 0;
     float scaleRatio = g_ScreenHeight / 1080.0f;
-    if (scaleRatio < 0.6f) scaleRatio = 0.6f;
-    if (scaleRatio > 1.4f) scaleRatio = 1.4f;
+    if (scaleRatio < 0.65f) scaleRatio = 0.65f;
+    if (scaleRatio > 1.35f) scaleRatio = 1.35f;
 
-    // 1. FLOATING BUTTON ICON (Selalu ada di pojok kiri atas)
-    float btnLeft   = 25.0f * scaleRatio;
-    float btnTop    = 20.0f * scaleRatio;
-    float btnRight  = btnLeft + (250.0f * scaleRatio);
-    float btnBottom = btnTop  + (55.0f  * scaleRatio);
+    // 1. FLOATING BUTTON ICON (DEFAULT DI TOP CENTER LAYAR)
+    float btnWidth  = 280.0f * scaleRatio;
+    float btnHeight = 54.0f  * scaleRatio;
+    float btnLeft   = (g_ScreenWidth - btnWidth) * 0.5f; // Posisi TOP CENTER!
+    float btnTop    = 15.0f  * scaleRatio;
+    float btnRight  = btnLeft + btnWidth;
+    float btnBottom = btnTop + btnHeight;
 
     if (!bNativeMenuOpen)
     {
-        // Tombol Buka Menu
-        DrawBorderedBox(btnLeft, btnTop, btnRight, btnBottom, CRGBA(10, 15, 22, 220), CRGBA(255, 215, 0, 255), 2.5f * scaleRatio);
-        DrawTextAt(btnLeft + (15.0f * scaleRatio), btnTop + (12.0f * scaleRatio), "[$] CHEAT UANG", 1.05f * scaleRatio, CRGBA(255, 230, 80, 255));
+        DrawBorderedBox(btnLeft, btnTop, btnRight, btnBottom, CRGBA(10, 16, 26, 235), CRGBA(255, 215, 0, 255), 2.5f * scaleRatio);
+        DrawTextAt(btnLeft + (32.0f * scaleRatio), btnTop + (13.0f * scaleRatio), "[$] CHEAT UANG", 1.20f * scaleRatio, CRGBA(255, 230, 80, 255));
     }
     else
     {
-        // Tombol Tutup Menu
-        DrawBorderedBox(btnLeft, btnTop, btnRight, btnBottom, CRGBA(140, 25, 25, 235), CRGBA(255, 255, 255, 255), 2.5f * scaleRatio);
-        DrawTextAt(btnLeft + (20.0f * scaleRatio), btnTop + (12.0f * scaleRatio), "[X] TUTUP MENU", 1.05f * scaleRatio, CRGBA(255, 255, 255, 255));
+        DrawBorderedBox(btnLeft, btnTop, btnRight, btnBottom, CRGBA(140, 25, 25, 240), CRGBA(255, 255, 255, 255), 2.5f * scaleRatio);
+        DrawTextAt(btnLeft + (36.0f * scaleRatio), btnTop + (13.0f * scaleRatio), "[X] TUTUP MENU", 1.20f * scaleRatio, CRGBA(255, 255, 255, 255));
     }
 
-    // 2. CLEO-STYLE FLOATING MOD MENU WINDOW
-    if (bNativeMenuOpen)
+    // 2. LAYAR MENU UTAMA (SCREEN_MAIN_MENU)
+    if (bNativeMenuOpen && g_CurrentMenuScreen == SCREEN_MAIN_MENU)
     {
-        float menuW = 540.0f * scaleRatio;
-        float menuH = 610.0f * scaleRatio;
+        int totalPages = (TOTAL_MENU_ITEMS + MAX_ITEMS_PER_PAGE - 1) / MAX_ITEMS_PER_PAGE;
+        if (totalPages < 1) totalPages = 1;
+        if (g_MenuPage >= totalPages) g_MenuPage = totalPages - 1;
+        if (g_MenuPage < 0) g_MenuPage = 0;
+
+        int startIndex = g_MenuPage * MAX_ITEMS_PER_PAGE;
+        int itemsOnPage = TOTAL_MENU_ITEMS - startIndex;
+        if (itemsOnPage > MAX_ITEMS_PER_PAGE) itemsOnPage = MAX_ITEMS_PER_PAGE;
+
+        bool hasPagination = (TOTAL_MENU_ITEMS > MAX_ITEMS_PER_PAGE);
+
+        float menuW = 600.0f * scaleRatio;
+        float itemH = 52.0f * scaleRatio;
+        float itemGap = 10.0f * scaleRatio;
+        float headerH = 50.0f * scaleRatio;
+        float subH = 36.0f * scaleRatio;
+        float bottomPadding = (hasPagination ? 75.0f : 35.0f) * scaleRatio;
+        float menuH = headerH + subH + (itemsOnPage * (itemH + itemGap)) + bottomPadding + (g_FeedbackTimer > 0 ? 30.0f * scaleRatio : 0.0f);
+
         float menuX = (g_ScreenWidth - menuW) * 0.5f;
         float menuY = (g_ScreenHeight - menuH) * 0.5f;
 
-        // Background dan Border Utama Jendela
+        // Background dan Border Jendela
         DrawBorderedBox(menuX, menuY, menuX + menuW, menuY + menuH, CRGBA(12, 16, 24, 245), CRGBA(255, 215, 0, 255), 3.0f * scaleRatio);
 
         // Header Title Bar
-        DrawFilledBox(menuX, menuY, menuX + menuW, menuY + (50.0f * scaleRatio), CRGBA(25, 85, 45, 255));
-        DrawTextAt(menuX + (20.0f * scaleRatio), menuY + (12.0f * scaleRatio), "--- CHEAT UANG (CLEO MENU) ---", 1.05f * scaleRatio, CRGBA(255, 255, 255, 255));
+        DrawFilledBox(menuX, menuY, menuX + menuW, menuY + headerH, CRGBA(25, 85, 45, 255));
+        DrawTextAt(menuX + (25.0f * scaleRatio), menuY + (12.0f * scaleRatio), "--- CHEAT UANG & RESMI ---", 1.20f * scaleRatio, CRGBA(255, 255, 255, 255));
 
         // Subtitle Status & Uang
         char subBuf[128];
-        snprintf(subBuf, sizeof(subBuf), "CJ: $%d | Target: $%d | %s", curMoney, targetMoney, inGame ? "In-Game" : "Menu/Loading");
-        DrawTextAt(menuX + (20.0f * scaleRatio), menuY + (58.0f * scaleRatio), subBuf, 0.85f * scaleRatio, inGame ? CRGBA(120, 255, 140, 255) : CRGBA(255, 180, 70, 255));
+        snprintf(subBuf, sizeof(subBuf), "CJ: $%d | Target: $%d | %s", curMoney, targetMoney, inGame ? "In-Game" : "Menu");
+        DrawTextAt(menuX + (25.0f * scaleRatio), menuY + headerH + (7.0f * scaleRatio), subBuf, 1.05f * scaleRatio, inGame ? CRGBA(120, 255, 140, 255) : CRGBA(255, 180, 70, 255));
 
         // Pemisah garis
-        DrawFilledBox(menuX + (10.0f * scaleRatio), menuY + (84.0f * scaleRatio), menuX + menuW - (10.0f * scaleRatio), menuY + (86.0f * scaleRatio), CRGBA(255, 215, 0, 180));
+        DrawFilledBox(menuX + (12.0f * scaleRatio), menuY + headerH + subH, menuX + menuW - (12.0f * scaleRatio), menuY + headerH + subH + (2.0f * scaleRatio), CRGBA(255, 215, 0, 180));
 
-        // Daftar 10 Tombol Aksi Menu
-        const char* itemLabels[10] = {
-            "[+] TAMBAH $100.000",
-            "[+] TAMBAH $1.000.000",
-            "[=] SET $2.000.000 (DEFAULT)",
-            "[=] SET $999.999.999 (MAX)",
-            bDynamicInfiniteMoney ? "[*] DYNAMIC INFINITE: [AKTIF]" : "[*] DYNAMIC INFINITE: [NONAKTIF]",
-            bForceExactMoney      ? "[*] FORCE EXACT: [AKTIF]"      : "[*] FORCE EXACT: [NONAKTIF]",
-            "[-] RESET NORMAL ($350)",
-            "[0] KURAS UANG ($0 / BROKE)",
-            "[S] SIMPAN CONFIG (.INI)",
-            "[X] TUTUP MENU"
-        };
+        // Daftar Tombol Aksi Menu Sesuai Halaman Aktif
+        float startY = menuY + headerH + subH + (12.0f * scaleRatio);
+        float itemLeft = menuX + (20.0f * scaleRatio);
+        float itemRight = menuX + menuW - (20.0f * scaleRatio);
 
-        float startY    = menuY + (95.0f * scaleRatio);
-        float itemH     = 42.0f * scaleRatio;
-        float itemGap   = 6.0f  * scaleRatio;
-        float itemLeft  = menuX + (15.0f * scaleRatio);
-        float itemRight = menuX + menuW - (15.0f * scaleRatio);
-
-        for (int i = 0; i < 10; ++i)
+        for (int i = 0; i < itemsOnPage; ++i)
         {
+            int globalIndex = startIndex + i;
+            const auto& def = g_MainMenuItems[globalIndex];
+
             float rowTop = startY + i * (itemH + itemGap);
             float rowBottom = rowTop + itemH;
 
-            CRGBA itemBg     = (g_PressedItem == i) ? CRGBA(50, 160, 70, 255) : CRGBA(30, 36, 48, 220);
-            CRGBA itemBorder = (g_PressedItem == i) ? CRGBA(255, 255, 255, 255) : CRGBA(80, 95, 120, 180);
-            CRGBA textColor  = (i == 9) ? CRGBA(255, 100, 100, 255) : (i == 4 || i == 5) ? CRGBA(255, 230, 90, 255) : CRGBA(240, 245, 255, 255);
+            bool isPressed = (g_PressedItem == globalIndex);
+            CRGBA bg = isPressed ? CRGBA(60, 170, 85, 255) : def.bgColor;
+            CRGBA border = isPressed ? CRGBA(255, 255, 255, 255) : def.borderColor;
 
-            DrawBorderedBox(itemLeft, rowTop, itemRight, rowBottom, itemBg, itemBorder, 1.5f * scaleRatio);
-            DrawTextAt(itemLeft + (15.0f * scaleRatio), rowTop + (10.0f * scaleRatio), itemLabels[i], 0.95f * scaleRatio, textColor);
+            DrawBorderedBox(itemLeft, rowTop, itemRight, rowBottom, bg, border, 2.0f * scaleRatio);
+            DrawTextAt(itemLeft + (20.0f * scaleRatio), rowTop + (13.0f * scaleRatio), def.label, 1.15f * scaleRatio, def.textColor);
         }
 
-        // Pesan Notifikasi Feedback di Bagian Bawah
+        // Pagination Bar jika item menu melebihi MAX_ITEMS_PER_PAGE (10)
+        if (hasPagination)
+        {
+            float pagY = startY + itemsOnPage * (itemH + itemGap) + (6.0f * scaleRatio);
+            float pagBtnW = 140.0f * scaleRatio;
+            float pagBtnH = 42.0f * scaleRatio;
+
+            // Tombol Prev
+            bool prevPressed = (g_PressedItem == 90);
+            DrawBorderedBox(itemLeft, pagY, itemLeft + pagBtnW, pagY + pagBtnH,
+                            prevPressed ? CRGBA(70, 90, 120, 255) : CRGBA(35, 45, 60, 230),
+                            CRGBA(180, 200, 220, 255), 1.5f * scaleRatio);
+            DrawTextAt(itemLeft + (15.0f * scaleRatio), pagY + (10.0f * scaleRatio), "[< PREV]", 1.10f * scaleRatio, CRGBA(255, 255, 255, 255));
+
+            // Info Halaman
+            char pagInfo[48];
+            snprintf(pagInfo, sizeof(pagInfo), "HALAMAN %d / %d", g_MenuPage + 1, totalPages);
+            DrawTextAt(itemLeft + pagBtnW + (20.0f * scaleRatio), pagY + (10.0f * scaleRatio), pagInfo, 1.10f * scaleRatio, CRGBA(255, 235, 120, 255));
+
+            // Tombol Next
+            bool nextPressed = (g_PressedItem == 91);
+            float nextLeft = itemRight - pagBtnW;
+            DrawBorderedBox(nextLeft, pagY, itemRight, pagY + pagBtnH,
+                            nextPressed ? CRGBA(70, 90, 120, 255) : CRGBA(35, 45, 60, 230),
+                            CRGBA(180, 200, 220, 255), 1.5f * scaleRatio);
+            DrawTextAt(nextLeft + (15.0f * scaleRatio), pagY + (10.0f * scaleRatio), "[NEXT >]", 1.10f * scaleRatio, CRGBA(255, 255, 255, 255));
+        }
+
+        // Pesan Notifikasi Feedback
         if (g_FeedbackTimer > 0 && g_FeedbackMsg[0] != '\0')
         {
             --g_FeedbackTimer;
-            DrawTextAt(menuX + (20.0f * scaleRatio), menuY + menuH - (25.0f * scaleRatio), g_FeedbackMsg, 0.85f * scaleRatio, CRGBA(60, 255, 100, 255));
+            DrawTextAt(menuX + (25.0f * scaleRatio), menuY + menuH - (25.0f * scaleRatio), g_FeedbackMsg, 1.05f * scaleRatio, CRGBA(60, 255, 100, 255));
+        }
+    }
+    // 3. LAYAR SET UANG MANUAL DENGAN KEYPAD & APPLY BUTTON (SCREEN_MANUAL_SET_MONEY)
+    else if (bNativeMenuOpen && g_CurrentMenuScreen == SCREEN_MANUAL_SET_MONEY)
+    {
+        float winW = 600.0f * scaleRatio;
+        float winH = 540.0f * scaleRatio;
+        float winX = (g_ScreenWidth - winW) * 0.5f;
+        float winY = (g_ScreenHeight - winH) * 0.5f;
+
+        // Background dan Border Jendela
+        DrawBorderedBox(winX, winY, winX + winW, winY + winH, CRGBA(12, 16, 24, 248), CRGBA(255, 215, 0, 255), 3.0f * scaleRatio);
+
+        // Header Title Bar
+        DrawFilledBox(winX, winY, winX + winW, winY + (48.0f * scaleRatio), CRGBA(25, 85, 45, 255));
+        DrawTextAt(winX + (25.0f * scaleRatio), winY + (12.0f * scaleRatio), "--- SET UANG: INPUT MANUAL NOMINAL ---", 1.15f * scaleRatio, CRGBA(255, 255, 255, 255));
+
+        // Display Box Nominal Uang
+        float dispLeft = winX + (20.0f * scaleRatio);
+        float dispRight = winX + winW - (20.0f * scaleRatio);
+        float dispTop = winY + (58.0f * scaleRatio);
+        float dispH = 55.0f * scaleRatio;
+
+        DrawBorderedBox(dispLeft, dispTop, dispRight, dispTop + dispH, CRGBA(8, 14, 22, 255), CRGBA(255, 215, 0, 255), 2.0f * scaleRatio);
+
+        char moneyFormatted[64];
+        FormatMoneyNumber(g_ManualInputMoney, moneyFormatted, sizeof(moneyFormatted));
+        DrawTextAt(dispLeft + (20.0f * scaleRatio), dispTop + (13.0f * scaleRatio), moneyFormatted, 1.30f * scaleRatio, CRGBA(80, 255, 120, 255));
+
+        // Quick Preset Buttons Row
+        float quickTop = dispTop + dispH + (10.0f * scaleRatio);
+        float quickH = 42.0f * scaleRatio;
+        float totalQuickW = dispRight - dispLeft;
+        float quickGap = 6.0f * scaleRatio;
+        float qBtnW = (totalQuickW - 4.0f * quickGap) / 5.0f;
+
+        const char* qLabels[5] = { "+100K", "+1M", "+10M", "MAX", "CLEAR" };
+        int qIds[5] = { 100, 101, 102, 103, 104 };
+
+        for (int q = 0; q < 5; ++q)
+        {
+            float qLeft = dispLeft + q * (qBtnW + quickGap);
+            float qRight = qLeft + qBtnW;
+            bool qPressed = (g_PressedItem == qIds[q]);
+
+            CRGBA qBg = qPressed ? CRGBA(60, 160, 80, 255) : (q == 3 ? CRGBA(70, 50, 20, 230) : (q == 4 ? CRGBA(70, 25, 25, 230) : CRGBA(30, 42, 58, 230)));
+            CRGBA qBorder = qPressed ? CRGBA(255, 255, 255, 255) : CRGBA(180, 200, 220, 200);
+
+            DrawBorderedBox(qLeft, quickTop, qRight, quickTop + quickH, qBg, qBorder, 1.5f * scaleRatio);
+            DrawTextAt(qLeft + (10.0f * scaleRatio), quickTop + (10.0f * scaleRatio), qLabels[q], 1.05f * scaleRatio, CRGBA(255, 255, 255, 255));
+        }
+
+        // Numeric Keypad Grid (4 baris x 3 kolom)
+        float gridTop = quickTop + quickH + (10.0f * scaleRatio);
+        float keyH = 46.0f * scaleRatio;
+        float rowGap = 7.0f * scaleRatio;
+        float colGap = 8.0f * scaleRatio;
+        float keyW = (totalQuickW - 2.0f * colGap) / 3.0f;
+
+        const char* keyLabels[4][3] = {
+            { "1", "2", "3" },
+            { "4", "5", "6" },
+            { "7", "8", "9" },
+            { "000", "0", "DEL" }
+        };
+        int keyIds[4][3] = {
+            { 1, 2, 3 },
+            { 4, 5, 6 },
+            { 7, 8, 9 },
+            { 20, 0, 21 }
+        };
+
+        for (int r = 0; r < 4; ++r)
+        {
+            float rTop = gridTop + r * (keyH + rowGap);
+            float rBottom = rTop + keyH;
+
+            for (int c = 0; c < 3; ++c)
+            {
+                float kLeft = dispLeft + c * (keyW + colGap);
+                float kRight = kLeft + keyW;
+
+                int kId = keyIds[r][c];
+                bool kPressed = (g_PressedItem == kId);
+
+                CRGBA kBg = kPressed ? CRGBA(80, 180, 90, 255) : (kId == 21 ? CRGBA(65, 30, 30, 230) : CRGBA(26, 34, 46, 230));
+                CRGBA kBorder = kPressed ? CRGBA(255, 255, 255, 255) : CRGBA(90, 110, 140, 200);
+
+                DrawBorderedBox(kLeft, rTop, kRight, rBottom, kBg, kBorder, 1.5f * scaleRatio);
+
+                float fontScale = (kId == 20 || kId == 21) ? 1.15f * scaleRatio : 1.30f * scaleRatio;
+                float textOffset = (kId == 20) ? (16.0f * scaleRatio) : (kId == 21 ? (20.0f * scaleRatio) : (keyW * 0.42f));
+
+                DrawTextAt(kLeft + textOffset, rTop + (9.0f * scaleRatio), keyLabels[r][c], fontScale, CRGBA(255, 255, 255, 255));
+            }
+        }
+
+        // Action Buttons Row (KEMBALI & TERAPKAN / APPLY)
+        float actTop = gridTop + 4 * (keyH + rowGap) + (6.0f * scaleRatio);
+        float actH = 50.0f * scaleRatio;
+
+        // Tombol Kembali
+        float backW = 180.0f * scaleRatio;
+        bool backPressed = (g_PressedItem == 30);
+        DrawBorderedBox(dispLeft, actTop, dispLeft + backW, actTop + actH,
+                        backPressed ? CRGBA(160, 40, 40, 255) : CRGBA(70, 28, 28, 235),
+                        CRGBA(240, 100, 100, 220), 2.0f * scaleRatio);
+        DrawTextAt(dispLeft + (25.0f * scaleRatio), actTop + (13.0f * scaleRatio), "[< KEMBALI]", 1.15f * scaleRatio, CRGBA(255, 255, 255, 255));
+
+        // Tombol Terapkan (APPLY)
+        float applyLeft = dispLeft + backW + (10.0f * scaleRatio);
+        float applyRight = dispRight;
+        bool applyPressed = (g_PressedItem == 31);
+        DrawBorderedBox(applyLeft, actTop, applyRight, actTop + actH,
+                        applyPressed ? CRGBA(40, 200, 70, 255) : CRGBA(28, 130, 45, 240),
+                        CRGBA(100, 255, 140, 255), 2.0f * scaleRatio);
+        DrawTextAt(applyLeft + (30.0f * scaleRatio), actTop + (13.0f * scaleRatio), ">>> TERAPKAN (APPLY) <<<", 1.20f * scaleRatio, CRGBA(255, 255, 255, 255));
+
+        // Feedback notification
+        if (g_FeedbackTimer > 0 && g_FeedbackMsg[0] != '\0')
+        {
+            --g_FeedbackTimer;
+            DrawTextAt(winX + (25.0f * scaleRatio), winY + winH - (22.0f * scaleRatio), g_FeedbackMsg, 1.05f * scaleRatio, CRGBA(60, 255, 100, 255));
         }
     }
 }
 
 // -------------------------------------------------------------
-// Touch Input Handling (Menangani sentuhan & gesture CLEO swipe)
+// Touch Input Handling (Sentuhan Menu & Gesture Swipe)
 // -------------------------------------------------------------
 bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
 {
@@ -363,15 +614,17 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
     if (trackNum != 0) return bNativeMenuOpen;
 
     float scaleRatio = g_ScreenHeight / 1080.0f;
-    if (scaleRatio < 0.6f) scaleRatio = 0.6f;
-    if (scaleRatio > 1.4f) scaleRatio = 1.4f;
+    if (scaleRatio < 0.65f) scaleRatio = 0.65f;
+    if (scaleRatio > 1.35f) scaleRatio = 1.35f;
 
-    float btnLeft   = 25.0f * scaleRatio;
-    float btnTop    = 20.0f * scaleRatio;
-    float btnRight  = btnLeft + (250.0f * scaleRatio);
-    float btnBottom = btnTop  + (55.0f  * scaleRatio);
+    // 1. Sentuhan pada Floating Toggle Button (DEFAULT DI TOP CENTER LAYAR)
+    float btnWidth  = 280.0f * scaleRatio;
+    float btnHeight = 54.0f  * scaleRatio;
+    float btnLeft   = (g_ScreenWidth - btnWidth) * 0.5f; // Posisi TOP CENTER!
+    float btnTop    = 15.0f  * scaleRatio;
+    float btnRight  = btnLeft + btnWidth;
+    float btnBottom = btnTop + btnHeight;
 
-    // 1. Sentuhan pada Floating Toggle Button
     if (x >= btnLeft && x <= btnRight && y >= btnTop && y <= btnBottom)
     {
         if (actionType == 1) // TOUCH_RELEASE
@@ -379,6 +632,10 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
             bNativeMenuOpen = !bNativeMenuOpen;
             g_PressedItem = -1;
             g_FeedbackTimer = 0;
+            if (!bNativeMenuOpen)
+            {
+                g_CurrentMenuScreen = SCREEN_MAIN_MENU;
+            }
         }
         return true; // Sentuhan diserap, game tidak merespon
     }
@@ -386,139 +643,309 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
     // 2. Sentuhan saat Jendela Menu Terbuka
     if (bNativeMenuOpen)
     {
-        float menuW = 540.0f * scaleRatio;
-        float menuH = 610.0f * scaleRatio;
-        float menuX = (g_ScreenWidth - menuW) * 0.5f;
-        float menuY = (g_ScreenHeight - menuH) * 0.5f;
-
-        bool insideWindow = (x >= menuX && x <= menuX + menuW && y >= menuY && y <= menuY + menuH);
-
-        if (insideWindow)
+        if (g_CurrentMenuScreen == SCREEN_MAIN_MENU)
         {
-            float startY    = menuY + (95.0f * scaleRatio);
-            float itemH     = 42.0f * scaleRatio;
-            float itemGap   = 6.0f  * scaleRatio;
-            float itemLeft  = menuX + (15.0f * scaleRatio);
-            float itemRight = menuX + menuW - (15.0f * scaleRatio);
+            int totalPages = (TOTAL_MENU_ITEMS + MAX_ITEMS_PER_PAGE - 1) / MAX_ITEMS_PER_PAGE;
+            if (totalPages < 1) totalPages = 1;
+            if (g_MenuPage >= totalPages) g_MenuPage = totalPages - 1;
+            if (g_MenuPage < 0) g_MenuPage = 0;
 
-            int touchedRow = -1;
-            for (int i = 0; i < 10; ++i)
+            int startIndex = g_MenuPage * MAX_ITEMS_PER_PAGE;
+            int itemsOnPage = TOTAL_MENU_ITEMS - startIndex;
+            if (itemsOnPage > MAX_ITEMS_PER_PAGE) itemsOnPage = MAX_ITEMS_PER_PAGE;
+
+            bool hasPagination = (TOTAL_MENU_ITEMS > MAX_ITEMS_PER_PAGE);
+
+            float menuW = 600.0f * scaleRatio;
+            float itemH = 52.0f * scaleRatio;
+            float itemGap = 10.0f * scaleRatio;
+            float headerH = 50.0f * scaleRatio;
+            float subH = 36.0f * scaleRatio;
+            float bottomPadding = (hasPagination ? 75.0f : 35.0f) * scaleRatio;
+            float menuH = headerH + subH + (itemsOnPage * (itemH + itemGap)) + bottomPadding + (g_FeedbackTimer > 0 ? 30.0f * scaleRatio : 0.0f);
+
+            float menuX = (g_ScreenWidth - menuW) * 0.5f;
+            float menuY = (g_ScreenHeight - menuH) * 0.5f;
+
+            bool insideWindow = (x >= menuX && x <= menuX + menuW && y >= menuY && y <= menuY + menuH);
+
+            if (insideWindow)
             {
-                float rowTop = startY + i * (itemH + itemGap);
-                float rowBottom = rowTop + itemH;
-                if (x >= itemLeft && x <= itemRight && y >= rowTop && y <= rowBottom)
+                float startY = menuY + headerH + subH + (12.0f * scaleRatio);
+                float itemLeft = menuX + (20.0f * scaleRatio);
+                float itemRight = menuX + menuW - (20.0f * scaleRatio);
+
+                int touchedRow = -1;
+
+                for (int i = 0; i < itemsOnPage; ++i)
                 {
-                    touchedRow = i;
-                    break;
-                }
-            }
-
-            if (actionType == 2) // TOUCH_PUSH
-            {
-                g_PressedItem = touchedRow;
-            }
-            else if (actionType == 1) // TOUCH_RELEASE
-            {
-                if (g_PressedItem >= 0 && g_PressedItem == touchedRow)
-                {
-                    bool inGame = IsPlayerInGame();
-                    int32_t cur = inGame ? GetCurrentPlayerMoney() : 0;
-
-                    switch (g_PressedItem)
+                    float rowTop = startY + i * (itemH + itemGap);
+                    float rowBottom = rowTop + itemH;
+                    if (x >= itemLeft && x <= itemRight && y >= rowTop && y <= rowBottom)
                     {
-                        case 0: // +$100.000
-                            if (inGame)
-                            {
-                                int32_t val = cur + 100000;
-                                SetPlayerMoneyDirect(val);
-                                if (targetMoney < val) targetMoney = val;
-                                SetFeedback(">> Berhasil: Uang bertambah +$100.000!");
-                            }
-                            else SetFeedback(">> Gagal: Player belum spawn di game!");
-                            break;
-
-                        case 1: // +$1.000.000
-                            if (inGame)
-                            {
-                                int32_t val = cur + 1000000;
-                                SetPlayerMoneyDirect(val);
-                                if (targetMoney < val) targetMoney = val;
-                                SetFeedback(">> Berhasil: Uang bertambah +$1.000.000!");
-                            }
-                            else SetFeedback(">> Gagal: Player belum spawn di game!");
-                            break;
-
-                        case 2: // Set $2.000.000
-                            targetMoney = 2000000;
-                            if (inGame) SetPlayerMoneyDirect(2000000);
-                            SetFeedback(">> Berhasil: Uang diset ke $2.000.000!");
-                            break;
-
-                        case 3: // Set $999.999.999 (Max)
-                            targetMoney = 999999999;
-                            if (inGame) SetPlayerMoneyDirect(999999999);
-                            SetFeedback(">> Berhasil: Uang diset MAX $999.999.999!");
-                            break;
-
-                        case 4: // Toggle Dynamic Infinite
-                            bDynamicInfiniteMoney = !bDynamicInfiniteMoney;
-                            SetFeedback(bDynamicInfiniteMoney ? ">> Dynamic Infinite: AKTIF" : ">> Dynamic Infinite: NONAKTIF");
-                            break;
-
-                        case 5: // Toggle Force Exact
-                            bForceExactMoney = !bForceExactMoney;
-                            SetFeedback(bForceExactMoney ? ">> Force Exact: AKTIF" : ">> Force Exact: NONAKTIF");
-                            break;
-
-                        case 6: // Reset Normal ($350)
-                            targetMoney = 350;
-                            bDynamicInfiniteMoney = false;
-                            bForceExactMoney = false;
-                            if (inGame) SetPlayerMoneyDirect(350);
-                            SetFeedback(">> Berhasil: Uang di-reset ke $350 (Normal)!");
-                            break;
-
-                        case 7: // Kuras Uang ($0)
-                            targetMoney = 0;
-                            bDynamicInfiniteMoney = false;
-                            bForceExactMoney = false;
-                            if (inGame) SetPlayerMoneyDirect(0);
-                            SetFeedback(">> Uang dikuras habis menjadi $0!");
-                            break;
-
-                        case 8: // Simpan Config
-                            SaveMoneyConfig();
-                            SetFeedback(">> Pengaturan berhasil disimpan ke .ini!");
-                            break;
-
-                        case 9: // Tutup Menu
-                            bNativeMenuOpen = false;
-                            break;
+                        touchedRow = startIndex + i;
+                        break;
                     }
                 }
-                g_PressedItem = -1;
-            }
 
-            return true; // Sentuhan di dalam menu diserap penuh
-        }
-        else
-        {
-            // Sentuhan di luar jendela menu saat menu terbuka -> tutup menu
-            if (actionType == 1) // TOUCH_RELEASE
-            {
-                bNativeMenuOpen = false;
-                g_PressedItem = -1;
+                if (hasPagination)
+                {
+                    float pagY = startY + itemsOnPage * (itemH + itemGap) + (6.0f * scaleRatio);
+                    float pagBtnW = 140.0f * scaleRatio;
+                    float pagBtnH = 42.0f * scaleRatio;
+
+                    if (y >= pagY && y <= pagY + pagBtnH)
+                    {
+                        if (x >= itemLeft && x <= itemLeft + pagBtnW)
+                        {
+                            touchedRow = 90; // PREV
+                        }
+                        else if (x >= itemRight - pagBtnW && x <= itemRight)
+                        {
+                            touchedRow = 91; // NEXT
+                        }
+                    }
+                }
+
+                if (actionType == 2) // TOUCH_PUSH
+                {
+                    g_PressedItem = touchedRow;
+                }
+                else if (actionType == 1) // TOUCH_RELEASE
+                {
+                    if (g_PressedItem >= 0 && g_PressedItem == touchedRow)
+                    {
+                        if (g_PressedItem == 0) // [1] SET UANG
+                        {
+                            g_CurrentMenuScreen = SCREEN_MANUAL_SET_MONEY;
+                            int32_t cMoney = GetCurrentPlayerMoney();
+                            g_ManualInputMoney = (cMoney > 0) ? (int64_t)cMoney : (int64_t)targetMoney;
+                            g_FeedbackTimer = 0;
+                        }
+                        else if (g_PressedItem == 1) // [2] CHEAT RESMI
+                        {
+                            TriggerOfficialCheat();
+                        }
+                        else if (g_PressedItem == 2) // [X] TUTUP MENU
+                        {
+                            bNativeMenuOpen = false;
+                            g_CurrentMenuScreen = SCREEN_MAIN_MENU;
+                        }
+                        else if (g_PressedItem == 90) // PREV PAGE
+                        {
+                            if (g_MenuPage > 0) --g_MenuPage;
+                        }
+                        else if (g_PressedItem == 91) // NEXT PAGE
+                        {
+                            if (g_MenuPage < totalPages - 1) ++g_MenuPage;
+                        }
+                    }
+                    g_PressedItem = -1;
+                }
+
+                return true; // Sentuhan di dalam menu diserap penuh
             }
-            return true;
+            else
+            {
+                // Sentuhan di luar jendela menu saat menu terbuka -> tutup menu
+                if (actionType == 1) // TOUCH_RELEASE
+                {
+                    bNativeMenuOpen = false;
+                    g_PressedItem = -1;
+                    g_CurrentMenuScreen = SCREEN_MAIN_MENU;
+                }
+                return true;
+            }
+        }
+        else if (g_CurrentMenuScreen == SCREEN_MANUAL_SET_MONEY)
+        {
+            float winW = 600.0f * scaleRatio;
+            float winH = 540.0f * scaleRatio;
+            float winX = (g_ScreenWidth - winW) * 0.5f;
+            float winY = (g_ScreenHeight - winH) * 0.5f;
+
+            bool insideWindow = (x >= winX && x <= winX + winW && y >= winY && y <= winY + winH);
+
+            if (insideWindow)
+            {
+                float dispLeft = winX + (20.0f * scaleRatio);
+                float dispRight = winX + winW - (20.0f * scaleRatio);
+                float dispTop = winY + (58.0f * scaleRatio);
+                float dispH = 55.0f * scaleRatio;
+
+                float quickTop = dispTop + dispH + (10.0f * scaleRatio);
+                float quickH = 42.0f * scaleRatio;
+                float totalQuickW = dispRight - dispLeft;
+                float quickGap = 6.0f * scaleRatio;
+                float qBtnW = (totalQuickW - 4.0f * quickGap) / 5.0f;
+                int qIds[5] = { 100, 101, 102, 103, 104 };
+
+                float gridTop = quickTop + quickH + (10.0f * scaleRatio);
+                float keyH = 46.0f * scaleRatio;
+                float rowGap = 7.0f * scaleRatio;
+                float colGap = 8.0f * scaleRatio;
+                float keyW = (totalQuickW - 2.0f * colGap) / 3.0f;
+                int keyIds[4][3] = {
+                    { 1, 2, 3 },
+                    { 4, 5, 6 },
+                    { 7, 8, 9 },
+                    { 20, 0, 21 }
+                };
+
+                float actTop = gridTop + 4 * (keyH + rowGap) + (6.0f * scaleRatio);
+                float actH = 50.0f * scaleRatio;
+                float backW = 180.0f * scaleRatio;
+                float applyLeft = dispLeft + backW + (10.0f * scaleRatio);
+
+                int touchedKey = -1;
+
+                // Cek Quick Preset Buttons
+                if (y >= quickTop && y <= quickTop + quickH)
+                {
+                    for (int q = 0; q < 5; ++q)
+                    {
+                        float qLeft = dispLeft + q * (qBtnW + quickGap);
+                        float qRight = qLeft + qBtnW;
+                        if (x >= qLeft && x <= qRight)
+                        {
+                            touchedKey = qIds[q];
+                            break;
+                        }
+                    }
+                }
+
+                // Cek Keypad Grid
+                if (touchedKey == -1)
+                {
+                    for (int r = 0; r < 4; ++r)
+                    {
+                        float rTop = gridTop + r * (keyH + rowGap);
+                        float rBottom = rTop + keyH;
+                        if (y >= rTop && y <= rBottom)
+                        {
+                            for (int c = 0; c < 3; ++c)
+                            {
+                                float kLeft = dispLeft + c * (keyW + colGap);
+                                float kRight = kLeft + keyW;
+                                if (x >= kLeft && x <= kRight)
+                                {
+                                    touchedKey = keyIds[r][c];
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // Cek Action Buttons (Kembali & Apply)
+                if (touchedKey == -1 && y >= actTop && y <= actTop + actH)
+                {
+                    if (x >= dispLeft && x <= dispLeft + backW)
+                    {
+                        touchedKey = 30; // KEMBALI
+                    }
+                    else if (x >= applyLeft && x <= dispRight)
+                    {
+                        touchedKey = 31; // APPLY
+                    }
+                }
+
+                if (actionType == 2) // TOUCH_PUSH
+                {
+                    g_PressedItem = touchedKey;
+                }
+                else if (actionType == 1) // TOUCH_RELEASE
+                {
+                    if (g_PressedItem >= 0 && g_PressedItem == touchedKey)
+                    {
+                        if (touchedKey >= 0 && touchedKey <= 9)
+                        {
+                            if (g_ManualInputMoney == 0)
+                            {
+                                g_ManualInputMoney = touchedKey;
+                            }
+                            else if (g_ManualInputMoney * 10 + touchedKey <= 999999999)
+                            {
+                                g_ManualInputMoney = g_ManualInputMoney * 10 + touchedKey;
+                            }
+                        }
+                        else if (touchedKey == 20) // 000
+                        {
+                            if (g_ManualInputMoney > 0)
+                            {
+                                if (g_ManualInputMoney <= 999999)
+                                    g_ManualInputMoney *= 1000;
+                                else
+                                    g_ManualInputMoney = 999999999;
+                            }
+                        }
+                        else if (touchedKey == 21) // DEL
+                        {
+                            g_ManualInputMoney /= 10;
+                        }
+                        else if (touchedKey == 100) // +100K
+                        {
+                            g_ManualInputMoney = std::min<int64_t>(g_ManualInputMoney + 100000, 999999999);
+                        }
+                        else if (touchedKey == 101) // +1M
+                        {
+                            g_ManualInputMoney = std::min<int64_t>(g_ManualInputMoney + 1000000, 999999999);
+                        }
+                        else if (touchedKey == 102) // +10M
+                        {
+                            g_ManualInputMoney = std::min<int64_t>(g_ManualInputMoney + 10000000, 999999999);
+                        }
+                        else if (touchedKey == 103) // MAX
+                        {
+                            g_ManualInputMoney = 999999999;
+                        }
+                        else if (touchedKey == 104) // CLEAR
+                        {
+                            g_ManualInputMoney = 0;
+                        }
+                        else if (touchedKey == 30) // KEMBALI
+                        {
+                            g_CurrentMenuScreen = SCREEN_MAIN_MENU;
+                            g_FeedbackTimer = 0;
+                        }
+                        else if (touchedKey == 31) // APPLY / TERAPKAN
+                        {
+                            targetMoney = (int32_t)g_ManualInputMoney;
+                            bDynamicInfiniteMoney = true;
+                            if (IsPlayerInGame()) SetPlayerMoneyDirect(targetMoney);
+                            SaveMoneyConfig();
+
+                            char fb[80];
+                            snprintf(fb, sizeof(fb), ">> Berhasil: Uang di-set ke $%d!", targetMoney);
+                            SetFeedback(fb);
+                            logger->Info("Uang berhasil diset manual dan disimpan: %d", targetMoney);
+                        }
+                    }
+                    g_PressedItem = -1;
+                }
+
+                return true;
+            }
+            else
+            {
+                if (actionType == 1) // TOUCH_RELEASE
+                {
+                    bNativeMenuOpen = false;
+                    g_PressedItem = -1;
+                    g_CurrentMenuScreen = SCREEN_MAIN_MENU;
+                }
+                return true;
+            }
         }
     }
 
-    // 3. Gesture Geser Turun (CLEO Swipe Down: dari atas tengah ke bawah)
+    // 3. Gesture Geser Turun (CLEO Swipe Down: dari TOP CENTER layar ke bawah)
     if (!bNativeMenuOpen)
     {
         if (actionType == 2) // TOUCH_PUSH
         {
-            if (y < g_ScreenHeight * 0.35f && x > g_ScreenWidth * 0.25f && x < g_ScreenWidth * 0.75f)
+            if (y < g_ScreenHeight * 0.35f && x > g_ScreenWidth * 0.30f && x < g_ScreenWidth * 0.70f)
             {
                 g_SwipeActive = true;
                 g_SwipeStartX = x;
@@ -532,6 +959,7 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
             if (deltaY > (130.0f * scaleRatio) && (deltaX < 120.0f * scaleRatio && deltaX > -120.0f * scaleRatio))
             {
                 bNativeMenuOpen = true;
+                g_CurrentMenuScreen = SCREEN_MAIN_MENU;
                 g_SwipeActive = false;
                 g_FeedbackTimer = 0;
                 return true;
@@ -777,6 +1205,7 @@ void Hooked_CGame_InitialiseWhenRestarting()
     bHasLoggedThisSession = false;
     bConfigSavedNotice = false;
     bNativeMenuOpen = false;
+    g_CurrentMenuScreen = SCREEN_MAIN_MENU;
     g_PressedItem = -1;
     CGame_InitialiseWhenRestarting();
 }
@@ -818,6 +1247,17 @@ extern "C" void OnModLoad()
     pPlayerInFocus = (uint8_t*)aml->GetSym(pGTASA, "_ZN6CWorld13PlayerInFocusE");
     FindPlayerPed  = (FindPlayerPed_fn)aml->GetSym(pGTASA, "_Z13FindPlayerPedi");
     pRsGlobal      = (RsGlobalType*)aml->GetSym(pGTASA, "RsGlobal");
+
+    // Resolusi cheat resmi CCheat::MoneyArmourHealthCheat (offset IDA: 0x3C1B64)
+    CCheat_MoneyArmourHealthCheat = (CCheat_MoneyArmourHealthCheat_fn)aml->GetSym(pGTASA, "_ZN6CCheat22MoneyArmourHealthCheatEv");
+    if (CCheat_MoneyArmourHealthCheat)
+    {
+        logger->Info("Symbol CCheat::MoneyArmourHealthCheat (_ZN6CCheat22MoneyArmourHealthCheatEv) berhasil ditemukan!");
+    }
+    else
+    {
+        logger->Error("Symbol CCheat::MoneyArmourHealthCheat tidak ditemukan di libGTASA.so!");
+    }
 
     if (pRsGlobal && pRsGlobal->maximumWidth > 0)
     {
