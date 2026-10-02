@@ -17,8 +17,7 @@ Thumbs.db
 desktop.ini
 $RECYCLE.BIN/
 
-# Exclude python scripts & GTA libraries
-*.py
+# Exclude GTA libraries & IDA databases
 libGTASA.so*
 *.i64
 *.id*

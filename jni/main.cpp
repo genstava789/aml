@@ -3,6 +3,7 @@
 #include <mod/config.h>
 #include "iimgui.h"
 #include <algorithm>
+#include <atomic>
 #include <string.h>
 #include <math.h>
 
@@ -94,6 +95,18 @@ CCheat_WeaponSkillsCheat_fn CCheat_WeaponSkillsCheat = nullptr;
 CCheat_JetpackCheat_fn CCheat_JetpackCheat = nullptr;
 CCheat_TogglePlayerInvincibility_fn CCheat_TogglePlayerInvincibility = nullptr;
 CPed_GiveWeapon_fn CPed_GiveWeapon = nullptr;
+
+typedef void (*CStreaming_RequestModel_fn)(int modelIndex, int flags);
+typedef void (*CStreaming_LoadAllRequestedModels_fn)(bool bPriority);
+CStreaming_RequestModel_fn CStreaming_RequestModel = nullptr;
+CStreaming_LoadAllRequestedModels_fn CStreaming_LoadAllRequestedModels = nullptr;
+
+// Antrean eksekusi aman di Main Game Thread (CGame::Process)
+// Menghindari race condition dan SIGSEGV dengan GraphicsThread!
+std::atomic<int> g_QueuedWeaponCheat{0};
+std::atomic<bool> g_QueuedOfficialCheat{false};
+std::atomic<bool> g_QueuedJetpackCheat{false};
+std::atomic<bool> g_QueuedGodModeCheat{false};
 
 bool bGodModeActive = false;
 
@@ -361,38 +374,34 @@ inline void FormatMoneyNumber(int64_t amount, char* out, size_t outSize)
     snprintf(out, outSize, "%s", formatted);
 }
 
-void TriggerOfficialCheat()
+void SafeGiveWeapon(int weaponType, int modelIndex, int ammo)
 {
-    if (CCheat_MoneyArmourHealthCheat)
+    if (!FindPlayerPed) return;
+    void* playerPed = FindPlayerPed(-1);
+    if (!playerPed)
     {
-        CCheat_MoneyArmourHealthCheat();
-        SetFeedback(">> Cheat Resmi Aktif: Health, Armor & Uang!");
-        logger->Info("Cheat resmi CCheat::MoneyArmourHealthCheat diaktifkan.");
+        uintptr_t localPlayer = GetLocalPlayerPtr();
+        if (localPlayer) playerPed = *(void**)(localPlayer + OFFSET_PED);
     }
-    else
+    if (!playerPed) return;
+    if (IsPedPointerValid && !IsPedPointerValid(playerPed)) return;
+
+    if (modelIndex > 0 && CStreaming_RequestModel && CStreaming_LoadAllRequestedModels)
     {
-        if (IsPlayerInGame())
-        {
-            int32_t cur = GetCurrentPlayerMoney();
-            int32_t next = cur + 250000;
-            SetPlayerMoneyDirect(next);
-            if (targetMoney < next) targetMoney = next;
-            SetFeedback(">> Cheat Aktif: Uang +$250.000 (Fallback)!");
-        }
-        else
-        {
-            SetFeedback(">> Gagal: Player belum di dalam gameplay!");
-        }
+        CStreaming_RequestModel(modelIndex, 2); // 2 = STREAMING_GAME_REQUIRED
+        CStreaming_LoadAllRequestedModels(false);
+    }
+
+    if (CPed_GiveWeapon)
+    {
+        CPed_GiveWeapon(playerPed, weaponType, ammo, true);
+        logger->Info("[Cheat] SafeGiveWeapon: tipe=%d, model=%d, ammo=%d berhasil diberikan.", weaponType, modelIndex, ammo);
     }
 }
 
-void TriggerWeaponCheat(int kitNumber)
+void ExecuteWeaponCheat(int kitNumber)
 {
-    if (!IsPlayerInGame())
-    {
-        SetFeedback(">> Gagal: Player belum di dalam gameplay!");
-        return;
-    }
+    if (!IsPlayerInGame()) return;
 
     switch (kitNumber)
     {
@@ -400,12 +409,7 @@ void TriggerWeaponCheat(int kitNumber)
         if (CCheat_WeaponCheat1)
         {
             CCheat_WeaponCheat1();
-            SetFeedback(">> Kit 1 Diberikan: Thug Tools (0x3C1248)!");
-            logger->Info("Cheat CCheat::WeaponCheat1 (0x3C1248) berhasil diaktifkan.");
-        }
-        else
-        {
-            SetFeedback(">> Gagal: Offset WeaponCheat1 tidak valid!");
+            logger->Info("[Cheat] CCheat::WeaponCheat1 (0x3C1248) berhasil dieksekusi di Main Thread.");
         }
         break;
 
@@ -413,12 +417,7 @@ void TriggerWeaponCheat(int kitNumber)
         if (CCheat_WeaponCheat2)
         {
             CCheat_WeaponCheat2();
-            SetFeedback(">> Kit 2 Diberikan: Professional Tools (0x3C1508)!");
-            logger->Info("Cheat CCheat::WeaponCheat2 (0x3C1508) berhasil diaktifkan.");
-        }
-        else
-        {
-            SetFeedback(">> Gagal: Offset WeaponCheat2 tidak valid!");
+            logger->Info("[Cheat] CCheat::WeaponCheat2 (0x3C1508) berhasil dieksekusi di Main Thread.");
         }
         break;
 
@@ -426,12 +425,7 @@ void TriggerWeaponCheat(int kitNumber)
         if (CCheat_WeaponCheat3)
         {
             CCheat_WeaponCheat3();
-            SetFeedback(">> Kit 3 Diberikan: Nutter Tools (0x3C178C)!");
-            logger->Info("Cheat CCheat::WeaponCheat3 (0x3C178C) berhasil diaktifkan.");
-        }
-        else
-        {
-            SetFeedback(">> Gagal: Offset WeaponCheat3 tidak valid!");
+            logger->Info("[Cheat] CCheat::WeaponCheat3 (0x3C178C) berhasil dieksekusi di Main Thread.");
         }
         break;
 
@@ -439,62 +433,25 @@ void TriggerWeaponCheat(int kitNumber)
         if (CCheat_WeaponCheat4)
         {
             CCheat_WeaponCheat4();
-            SetFeedback(">> Kit 4 Diberikan: Special Arsenal (0x3C199C)!");
-            logger->Info("Cheat CCheat::WeaponCheat4 (0x3C199C) berhasil diaktifkan.");
-        }
-        else
-        {
-            SetFeedback(">> Gagal: Offset WeaponCheat4 tidak valid!");
+            logger->Info("[Cheat] CCheat::WeaponCheat4 (0x3C199C) berhasil dieksekusi di Main Thread.");
         }
         break;
 
-    case 5: // Max Weapon Skills
+    case 5: // Max Weapon Skills (Hitman)
         if (CCheat_WeaponSkillsCheat)
         {
             CCheat_WeaponSkillsCheat();
-            SetFeedback(">> Max Weapon Skills: Hitman Level Semua Senjata (0x3C2E90)!");
-            logger->Info("Cheat CCheat::WeaponSkillsCheat (0x3C2E90) berhasil diaktifkan.");
-        }
-        else
-        {
-            SetFeedback(">> Gagal: Offset WeaponSkillsCheat tidak valid!");
+            logger->Info("[Cheat] CCheat::WeaponSkillsCheat (0x3C2E90) berhasil dieksekusi di Main Thread.");
         }
         break;
 
-    case 6: // Minigun 9999 Ammo
-        {
-            uintptr_t localPlayer = GetLocalPlayerPtr();
-            void* playerPed = localPlayer ? *(void**)(localPlayer + OFFSET_PED) : nullptr;
-            if (playerPed && CPed_GiveWeapon)
-            {
-                CPed_GiveWeapon(playerPed, 38, 9999, true); // 38 = WEAPON_MINIGUN
-                SetFeedback(">> Minigun 9999 Peluru Berhasil Diberikan (0x59525C)!");
-                logger->Info("CPed::GiveWeapon Minigun berhasil untuk ped: %p", playerPed);
-            }
-            else
-            {
-                if (CCheat_WeaponCheat4) CCheat_WeaponCheat4();
-                SetFeedback(">> Minigun Diberikan lewat Kit 4 (Fallback)!");
-            }
-        }
+    case 6: // Minigun 9999 Ammo (Weapon 38, Model 362)
+        SafeGiveWeapon(38, 362, 9999);
         break;
 
-    case 7: // Katana + Parachute
-        {
-            uintptr_t localPlayer = GetLocalPlayerPtr();
-            void* playerPed = localPlayer ? *(void**)(localPlayer + OFFSET_PED) : nullptr;
-            if (playerPed && CPed_GiveWeapon)
-            {
-                CPed_GiveWeapon(playerPed, 8, 1, true);   // 8 = WEAPON_KATANA
-                CPed_GiveWeapon(playerPed, 46, 1, false); // 46 = WEAPON_PARACHUTE
-                SetFeedback(">> Katana & Parachute Berhasil Diberikan (0x59525C)!");
-                logger->Info("CPed::GiveWeapon Katana & Parachute berhasil.");
-            }
-            else
-            {
-                SetFeedback(">> Gagal memberikan Katana/Parachute!");
-            }
-        }
+    case 7: // Katana (Weapon 8, Model 339) + Parachute (Weapon 46, Model 371)
+        SafeGiveWeapon(8, 339, 1);
+        SafeGiveWeapon(46, 371, 1);
         break;
 
     default:
@@ -502,26 +459,86 @@ void TriggerWeaponCheat(int kitNumber)
     }
 }
 
-void TriggerJetpackCheat()
+void ExecuteOfficialCheat()
+{
+    if (CCheat_MoneyArmourHealthCheat)
+    {
+        CCheat_MoneyArmourHealthCheat();
+        logger->Info("[Cheat] CCheat::MoneyArmourHealthCheat dieksekusi di Main Thread.");
+    }
+    else if (IsPlayerInGame())
+    {
+        int32_t cur = GetCurrentPlayerMoney();
+        int32_t next = cur + 250000;
+        SetPlayerMoneyDirect(next);
+        if (targetMoney < next) targetMoney = next;
+    }
+}
+
+void ExecuteJetpackCheat()
+{
+    if (CCheat_JetpackCheat)
+    {
+        CCheat_JetpackCheat();
+        logger->Info("[Cheat] CCheat::JetpackCheat (0x3C2A40) dieksekusi di Main Thread.");
+    }
+}
+
+void ExecuteGodModeCheat()
+{
+    if (CCheat_TogglePlayerInvincibility)
+    {
+        CCheat_TogglePlayerInvincibility();
+        logger->Info("[Cheat] CCheat::TogglePlayerInvincibility (0x3C1AB0) dieksekusi di Main Thread: status=%d", bGodModeActive);
+    }
+}
+
+// Queue functions (Dipanggil dari Touch Event / ImGui - Aman & Non-blocking)
+void QueueOfficialCheat()
 {
     if (!IsPlayerInGame())
     {
         SetFeedback(">> Gagal: Player belum di dalam gameplay!");
         return;
     }
-    if (CCheat_JetpackCheat)
+    g_QueuedOfficialCheat.store(true);
+    SetFeedback(">> Cheat Resmi Aktif: Health, Armor & Uang!");
+}
+
+void QueueWeaponCheat(int kitNumber)
+{
+    if (!IsPlayerInGame())
     {
-        CCheat_JetpackCheat();
-        SetFeedback(">> Cheat Jetpack Aktif: Jetpack Muncul (0x3C2A40)!");
-        logger->Info("Cheat CCheat::JetpackCheat (0x3C2A40) berhasil diaktifkan.");
+        SetFeedback(">> Gagal: Player belum di dalam gameplay!");
+        return;
     }
-    else
+    g_QueuedWeaponCheat.store(kitNumber);
+
+    switch (kitNumber)
     {
-        SetFeedback(">> Gagal: Offset Jetpack tidak valid!");
+    case 1: SetFeedback(">> Kit 1 Diberikan: Thug Tools (0x3C1248)!"); break;
+    case 2: SetFeedback(">> Kit 2 Diberikan: Professional Tools (0x3C1508)!"); break;
+    case 3: SetFeedback(">> Kit 3 Diberikan: Nutter Tools (0x3C178C)!"); break;
+    case 4: SetFeedback(">> Kit 4 Diberikan: Special Arsenal (0x3C199C)!"); break;
+    case 5: SetFeedback(">> Max Weapon Skills: Hitman Level Semua (0x3C2E90)!"); break;
+    case 6: SetFeedback(">> Minigun 9999 Peluru Berhasil Diberikan (0x59525C)!"); break;
+    case 7: SetFeedback(">> Katana & Parachute Berhasil Diberikan!"); break;
+    default: break;
     }
 }
 
-void TriggerGodModeCheat()
+void QueueJetpackCheat()
+{
+    if (!IsPlayerInGame())
+    {
+        SetFeedback(">> Gagal: Player belum di dalam gameplay!");
+        return;
+    }
+    g_QueuedJetpackCheat.store(true);
+    SetFeedback(">> Cheat Jetpack Aktif: Jetpack Muncul (0x3C2A40)!");
+}
+
+void QueueGodModeCheat()
 {
     if (!IsPlayerInGame())
     {
@@ -529,16 +546,8 @@ void TriggerGodModeCheat()
         return;
     }
     bGodModeActive = !bGodModeActive;
-    if (CCheat_TogglePlayerInvincibility)
-    {
-        CCheat_TogglePlayerInvincibility();
-        SetFeedback(bGodModeActive ? ">> God Mode: AKTIF (0x3C1AB0)!" : ">> God Mode: NONAKTIF (0x3C1AB0)!");
-        logger->Info("Cheat CCheat::TogglePlayerInvincibility (0x3C1AB0) diubah ke: %d", bGodModeActive);
-    }
-    else
-    {
-        SetFeedback(bGodModeActive ? ">> God Mode: AKTIF!" : ">> God Mode: NONAKTIF!");
-    }
+    g_QueuedGodModeCheat.store(true);
+    SetFeedback(bGodModeActive ? ">> God Mode: AKTIF (0x3C1AB0)!" : ">> God Mode: NONAKTIF (0x3C1AB0)!");
 }
 
 // -------------------------------------------------------------
@@ -1195,7 +1204,7 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
                         }
                         else if (g_PressedItem == 2) // [3] CHEAT RESMI
                         {
-                            TriggerOfficialCheat();
+                            QueueOfficialCheat();
                         }
                         else if (g_PressedItem == 3) // [4] AIM ASSIST HEAD
                         {
@@ -1206,11 +1215,11 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
                         }
                         else if (g_PressedItem == 4) // [5] CHEAT JETPACK
                         {
-                            TriggerJetpackCheat();
+                            QueueJetpackCheat();
                         }
                         else if (g_PressedItem == 5) // [6] GOD MODE
                         {
-                            TriggerGodModeCheat();
+                            QueueGodModeCheat();
                         }
                         else if (g_PressedItem == 6) // [X] TUTUP MENU
                         {
@@ -1469,19 +1478,19 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
                         int wepIndex = g_PressedItem - 200;
                         if (wepIndex >= 0 && wepIndex <= 3) // Kit 1 - 4
                         {
-                            TriggerWeaponCheat(wepIndex + 1);
+                            QueueWeaponCheat(wepIndex + 1);
                         }
                         else if (wepIndex == 4) // Max Weapon Skills
                         {
-                            TriggerWeaponCheat(5);
+                            QueueWeaponCheat(5);
                         }
                         else if (wepIndex == 5) // Minigun 9999
                         {
-                            TriggerWeaponCheat(6);
+                            QueueWeaponCheat(6);
                         }
                         else if (wepIndex == 6) // Katana + Parachute
                         {
-                            TriggerWeaponCheat(7);
+                            QueueWeaponCheat(7);
                         }
                         else if (wepIndex == 7) // Kembali ke Menu Utama
                         {
@@ -1695,47 +1704,47 @@ void RenderImGuiMenuContent()
 
     if (pImGui->Button("Kit 1: Thug Tools (0x3C1248)", ImVec2(pImGui->GetScaledX(240), 0)))
     {
-        TriggerWeaponCheat(1);
+        QueueWeaponCheat(1);
     }
     pImGui->SameLine();
     if (pImGui->Button("Kit 2: Professional (0x3C1508)", ImVec2(pImGui->GetScaledX(240), 0)))
     {
-        TriggerWeaponCheat(2);
+        QueueWeaponCheat(2);
     }
 
     if (pImGui->Button("Kit 3: Nutter Tools (0x3C178C)", ImVec2(pImGui->GetScaledX(240), 0)))
     {
-        TriggerWeaponCheat(3);
+        QueueWeaponCheat(3);
     }
     pImGui->SameLine();
     if (pImGui->Button("Kit 4: Special Arsenal (0x3C199C)", ImVec2(pImGui->GetScaledX(240), 0)))
     {
-        TriggerWeaponCheat(4);
+        QueueWeaponCheat(4);
     }
 
     if (pImGui->Button("Max Weapon Skills (0x3C2E90)", ImVec2(pImGui->GetScaledX(240), 0)))
     {
-        TriggerWeaponCheat(5);
+        QueueWeaponCheat(5);
     }
     pImGui->SameLine();
     if (pImGui->Button("Minigun 9999 Peluru (0x59525C)", ImVec2(pImGui->GetScaledX(240), 0)))
     {
-        TriggerWeaponCheat(6);
+        QueueWeaponCheat(6);
     }
 
     if (pImGui->Button("Katana + Parachute", ImVec2(pImGui->GetScaledX(240), 0)))
     {
-        TriggerWeaponCheat(7);
+        QueueWeaponCheat(7);
     }
     pImGui->SameLine();
     if (pImGui->Button("Spawn Jetpack (0x3C2A40)", ImVec2(pImGui->GetScaledX(240), 0)))
     {
-        TriggerJetpackCheat();
+        QueueJetpackCheat();
     }
 
     if (pImGui->Checkbox("God Mode / Invincible (0x3C1AB0)", &bGodModeActive))
     {
-        TriggerGodModeCheat();
+        QueueGodModeCheat();
     }
 
     pImGui->Separator();
@@ -1786,6 +1795,25 @@ void InitImGuiInterface()
 void Hooked_CGame_Process()
 {
     CGame_Process();
+
+    // Eksekusi antrean cheat di Main Game Thread secara aman (menghindari crash SIGSEGV pada GraphicsThread)
+    int pendingKit = g_QueuedWeaponCheat.exchange(0);
+    if (pendingKit > 0)
+    {
+        ExecuteWeaponCheat(pendingKit);
+    }
+    if (g_QueuedOfficialCheat.exchange(false))
+    {
+        ExecuteOfficialCheat();
+    }
+    if (g_QueuedJetpackCheat.exchange(false))
+    {
+        ExecuteJetpackCheat();
+    }
+    if (g_QueuedGodModeCheat.exchange(false))
+    {
+        ExecuteGodModeCheat();
+    }
 
     if (!bImGuiInitialized)
     {
@@ -1887,6 +1915,8 @@ extern "C" void OnModLoad()
         const uintptr_t OFF_JETPACK     = 0x2C09C0;
         const uintptr_t OFF_INVINCIBLE  = 0x2BF8E4;
         const uintptr_t OFF_GIVEWEAPON  = 0x43D698;
+        const uintptr_t OFF_REQMODEL    = 0x286398; // _ZN10CStreaming12RequestModelEii
+        const uintptr_t OFF_LOADMODELS  = 0x287CF0; // _ZN10CStreaming22LoadAllRequestedModelsEb
     #else
         const uintptr_t OFF_WEAPON1     = 0x3C1248; // _ZN6CCheat12WeaponCheat1Ev
         const uintptr_t OFF_WEAPON2     = 0x3C1508; // _ZN6CCheat12WeaponCheat2Ev
@@ -1896,6 +1926,8 @@ extern "C" void OnModLoad()
         const uintptr_t OFF_JETPACK     = 0x3C2A40; // _ZN6CCheat12JetpackCheatEv
         const uintptr_t OFF_INVINCIBLE  = 0x3C1AB0; // _ZN6CCheat25TogglePlayerInvincibilityEv
         const uintptr_t OFF_GIVEWEAPON  = 0x59525C; // _ZN4CPed10GiveWeaponE11eWeaponTypejb
+        const uintptr_t OFF_REQMODEL    = 0x3949E0; // _ZN10CStreaming12RequestModelEii
+        const uintptr_t OFF_LOADMODELS  = 0x396B28; // _ZN10CStreaming22LoadAllRequestedModelsEb
     #endif
 
     auto ResolveCheatFunc = [](uintptr_t base, const char* symName, uintptr_t offset) -> uintptr_t {
@@ -1924,6 +1956,8 @@ extern "C" void OnModLoad()
     CCheat_JetpackCheat = (CCheat_JetpackCheat_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat12JetpackCheatEv", OFF_JETPACK);
     CCheat_TogglePlayerInvincibility = (CCheat_TogglePlayerInvincibility_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat25TogglePlayerInvincibilityEv", OFF_INVINCIBLE);
     CPed_GiveWeapon = (CPed_GiveWeapon_fn)ResolveCheatFunc(pGTASA, "_ZN4CPed10GiveWeaponE11eWeaponTypejb", OFF_GIVEWEAPON);
+    CStreaming_RequestModel = (CStreaming_RequestModel_fn)ResolveCheatFunc(pGTASA, "_ZN10CStreaming12RequestModelEii", OFF_REQMODEL);
+    CStreaming_LoadAllRequestedModels = (CStreaming_LoadAllRequestedModels_fn)ResolveCheatFunc(pGTASA, "_ZN10CStreaming22LoadAllRequestedModelsEb", OFF_LOADMODELS);
 
     // Resolusi symbol untuk Aim Assist Head
     IsPedPointerValid = (IsPedPointerValid_fn)aml->GetSym(pGTASA, "_Z17IsPedPointerValidP4CPed");
