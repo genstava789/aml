@@ -76,6 +76,27 @@ FindPlayerPed_fn FindPlayerPed = nullptr;
 typedef void (*CCheat_MoneyArmourHealthCheat_fn)();
 CCheat_MoneyArmourHealthCheat_fn CCheat_MoneyArmourHealthCheat = nullptr;
 
+// Function pointers untuk Cheat Senjata & Fitur IDA Pro
+typedef void (*CCheat_WeaponCheat1_fn)();
+typedef void (*CCheat_WeaponCheat2_fn)();
+typedef void (*CCheat_WeaponCheat3_fn)();
+typedef void (*CCheat_WeaponCheat4_fn)();
+typedef void (*CCheat_WeaponSkillsCheat_fn)();
+typedef void (*CCheat_JetpackCheat_fn)();
+typedef void (*CCheat_TogglePlayerInvincibility_fn)();
+typedef void (*CPed_GiveWeapon_fn)(void* thisPed, int weaponType, unsigned int ammo, bool bSelect);
+
+CCheat_WeaponCheat1_fn CCheat_WeaponCheat1 = nullptr;
+CCheat_WeaponCheat2_fn CCheat_WeaponCheat2 = nullptr;
+CCheat_WeaponCheat3_fn CCheat_WeaponCheat3 = nullptr;
+CCheat_WeaponCheat4_fn CCheat_WeaponCheat4 = nullptr;
+CCheat_WeaponSkillsCheat_fn CCheat_WeaponSkillsCheat = nullptr;
+CCheat_JetpackCheat_fn CCheat_JetpackCheat = nullptr;
+CCheat_TogglePlayerInvincibility_fn CCheat_TogglePlayerInvincibility = nullptr;
+CPed_GiveWeapon_fn CPed_GiveWeapon = nullptr;
+
+bool bGodModeActive = false;
+
 typedef bool (*IsPedPointerValid_fn)(void* pPed);
 IsPedPointerValid_fn IsPedPointerValid = nullptr;
 
@@ -140,7 +161,8 @@ bool bHasLoggedThisSession = false;
 // Native Floating CLEO-style Menu State
 enum NativeMenuScreen {
     SCREEN_MAIN_MENU = 0,
-    SCREEN_MANUAL_SET_MONEY = 1
+    SCREEN_MANUAL_SET_MONEY = 1,
+    SCREEN_WEAPONS_MENU = 2
 };
 
 bool bNativeMenuOpen = false;
@@ -364,6 +386,161 @@ void TriggerOfficialCheat()
     }
 }
 
+void TriggerWeaponCheat(int kitNumber)
+{
+    if (!IsPlayerInGame())
+    {
+        SetFeedback(">> Gagal: Player belum di dalam gameplay!");
+        return;
+    }
+
+    switch (kitNumber)
+    {
+    case 1:
+        if (CCheat_WeaponCheat1)
+        {
+            CCheat_WeaponCheat1();
+            SetFeedback(">> Kit 1 Diberikan: Thug Tools (0x3C1248)!");
+            logger->Info("Cheat CCheat::WeaponCheat1 (0x3C1248) berhasil diaktifkan.");
+        }
+        else
+        {
+            SetFeedback(">> Gagal: Offset WeaponCheat1 tidak valid!");
+        }
+        break;
+
+    case 2:
+        if (CCheat_WeaponCheat2)
+        {
+            CCheat_WeaponCheat2();
+            SetFeedback(">> Kit 2 Diberikan: Professional Tools (0x3C1508)!");
+            logger->Info("Cheat CCheat::WeaponCheat2 (0x3C1508) berhasil diaktifkan.");
+        }
+        else
+        {
+            SetFeedback(">> Gagal: Offset WeaponCheat2 tidak valid!");
+        }
+        break;
+
+    case 3:
+        if (CCheat_WeaponCheat3)
+        {
+            CCheat_WeaponCheat3();
+            SetFeedback(">> Kit 3 Diberikan: Nutter Tools (0x3C178C)!");
+            logger->Info("Cheat CCheat::WeaponCheat3 (0x3C178C) berhasil diaktifkan.");
+        }
+        else
+        {
+            SetFeedback(">> Gagal: Offset WeaponCheat3 tidak valid!");
+        }
+        break;
+
+    case 4:
+        if (CCheat_WeaponCheat4)
+        {
+            CCheat_WeaponCheat4();
+            SetFeedback(">> Kit 4 Diberikan: Special Arsenal (0x3C199C)!");
+            logger->Info("Cheat CCheat::WeaponCheat4 (0x3C199C) berhasil diaktifkan.");
+        }
+        else
+        {
+            SetFeedback(">> Gagal: Offset WeaponCheat4 tidak valid!");
+        }
+        break;
+
+    case 5: // Max Weapon Skills
+        if (CCheat_WeaponSkillsCheat)
+        {
+            CCheat_WeaponSkillsCheat();
+            SetFeedback(">> Max Weapon Skills: Hitman Level Semua Senjata (0x3C2E90)!");
+            logger->Info("Cheat CCheat::WeaponSkillsCheat (0x3C2E90) berhasil diaktifkan.");
+        }
+        else
+        {
+            SetFeedback(">> Gagal: Offset WeaponSkillsCheat tidak valid!");
+        }
+        break;
+
+    case 6: // Minigun 9999 Ammo
+        {
+            uintptr_t localPlayer = GetLocalPlayerPtr();
+            void* playerPed = localPlayer ? *(void**)(localPlayer + OFFSET_PED) : nullptr;
+            if (playerPed && CPed_GiveWeapon)
+            {
+                CPed_GiveWeapon(playerPed, 38, 9999, true); // 38 = WEAPON_MINIGUN
+                SetFeedback(">> Minigun 9999 Peluru Berhasil Diberikan (0x59525C)!");
+                logger->Info("CPed::GiveWeapon Minigun berhasil untuk ped: %p", playerPed);
+            }
+            else
+            {
+                if (CCheat_WeaponCheat4) CCheat_WeaponCheat4();
+                SetFeedback(">> Minigun Diberikan lewat Kit 4 (Fallback)!");
+            }
+        }
+        break;
+
+    case 7: // Katana + Parachute
+        {
+            uintptr_t localPlayer = GetLocalPlayerPtr();
+            void* playerPed = localPlayer ? *(void**)(localPlayer + OFFSET_PED) : nullptr;
+            if (playerPed && CPed_GiveWeapon)
+            {
+                CPed_GiveWeapon(playerPed, 8, 1, true);   // 8 = WEAPON_KATANA
+                CPed_GiveWeapon(playerPed, 46, 1, false); // 46 = WEAPON_PARACHUTE
+                SetFeedback(">> Katana & Parachute Berhasil Diberikan (0x59525C)!");
+                logger->Info("CPed::GiveWeapon Katana & Parachute berhasil.");
+            }
+            else
+            {
+                SetFeedback(">> Gagal memberikan Katana/Parachute!");
+            }
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+void TriggerJetpackCheat()
+{
+    if (!IsPlayerInGame())
+    {
+        SetFeedback(">> Gagal: Player belum di dalam gameplay!");
+        return;
+    }
+    if (CCheat_JetpackCheat)
+    {
+        CCheat_JetpackCheat();
+        SetFeedback(">> Cheat Jetpack Aktif: Jetpack Muncul (0x3C2A40)!");
+        logger->Info("Cheat CCheat::JetpackCheat (0x3C2A40) berhasil diaktifkan.");
+    }
+    else
+    {
+        SetFeedback(">> Gagal: Offset Jetpack tidak valid!");
+    }
+}
+
+void TriggerGodModeCheat()
+{
+    if (!IsPlayerInGame())
+    {
+        SetFeedback(">> Gagal: Player belum di dalam gameplay!");
+        return;
+    }
+    bGodModeActive = !bGodModeActive;
+    if (CCheat_TogglePlayerInvincibility)
+    {
+        CCheat_TogglePlayerInvincibility();
+        SetFeedback(bGodModeActive ? ">> God Mode: AKTIF (0x3C1AB0)!" : ">> God Mode: NONAKTIF (0x3C1AB0)!");
+        logger->Info("Cheat CCheat::TogglePlayerInvincibility (0x3C1AB0) diubah ke: %d", bGodModeActive);
+    }
+    else
+    {
+        SetFeedback(bGodModeActive ? ">> God Mode: AKTIF!" : ">> God Mode: NONAKTIF!");
+    }
+}
+
 // -------------------------------------------------------------
 // Aim Assist Headshot (Otomatis Bidik Kepala NPC)
 // Menggunakan CCamera::UpdateAimingCoors & CPed::GetBonePosition
@@ -493,7 +670,7 @@ enum MainMenuAction
     ACTION_CLOSE_MENU = 4
 };
 
-const int TOTAL_MENU_ITEMS = 4;
+const int TOTAL_MENU_ITEMS = 7;
 const int MAX_ITEMS_PER_PAGE = 10; // Mendukung pagination otomatis jika menu melebihi 10 item!
 
 // -------------------------------------------------------------
@@ -520,7 +697,7 @@ void DrawNativeFloatingMenu()
     if (scaleRatio > 1.35f) scaleRatio = 1.35f;
 
     // 1. FLOATING BUTTON ICON (DEFAULT DI TOP CENTER LAYAR)
-    float btnWidth  = 280.0f * scaleRatio;
+    float btnWidth  = 290.0f * scaleRatio;
     float btnHeight = 54.0f  * scaleRatio;
     float btnLeft   = (g_ScreenWidth - btnWidth) * 0.5f; // Posisi TOP CENTER!
     float btnTop    = 15.0f  * scaleRatio;
@@ -530,7 +707,7 @@ void DrawNativeFloatingMenu()
     if (!bNativeMenuOpen)
     {
         DrawBorderedBox(btnLeft, btnTop, btnRight, btnBottom, CRGBA(10, 16, 26, 235), CRGBA(255, 215, 0, 255), 2.5f * scaleRatio);
-        DrawTextAt(btnLeft + (32.0f * scaleRatio), btnTop + (13.0f * scaleRatio), "[$] CHEAT UANG", 1.20f * scaleRatio, CRGBA(255, 230, 80, 255));
+        DrawTextAt(btnLeft + (24.0f * scaleRatio), btnTop + (13.0f * scaleRatio), "[+] CHEAT MENU (AML)", 1.20f * scaleRatio, CRGBA(255, 230, 80, 255));
     }
     else
     {
@@ -552,9 +729,9 @@ void DrawNativeFloatingMenu()
 
         bool hasPagination = (TOTAL_MENU_ITEMS > MAX_ITEMS_PER_PAGE);
 
-        float menuW = 600.0f * scaleRatio;
-        float itemH = 52.0f * scaleRatio;
-        float itemGap = 10.0f * scaleRatio;
+        float menuW = 620.0f * scaleRatio;
+        float itemH = 50.0f * scaleRatio;
+        float itemGap = 8.0f * scaleRatio;
         float headerH = 50.0f * scaleRatio;
         float subH = 36.0f * scaleRatio;
         float bottomPadding = (hasPagination ? 75.0f : 35.0f) * scaleRatio;
@@ -568,7 +745,7 @@ void DrawNativeFloatingMenu()
 
         // Header Title Bar
         DrawFilledBox(menuX, menuY, menuX + menuW, menuY + headerH, CRGBA(25, 85, 45, 255));
-        DrawTextAt(menuX + (25.0f * scaleRatio), menuY + (12.0f * scaleRatio), "--- CHEAT UANG & RESMI ---", 1.20f * scaleRatio, CRGBA(255, 255, 255, 255));
+        DrawTextAt(menuX + (25.0f * scaleRatio), menuY + (12.0f * scaleRatio), "--- CHEAT SUITE & RESMI (AML) ---", 1.20f * scaleRatio, CRGBA(255, 255, 255, 255));
 
         // Subtitle Status & Uang
         char subBuf[128];
@@ -580,30 +757,44 @@ void DrawNativeFloatingMenu()
 
         // Label & Gaya Dinamis Tombol Menu
         char aimLabel[64];
-        snprintf(aimLabel, sizeof(aimLabel), "[3] AIM ASSIST HEAD: [%s]", bAimAssistHead ? "AKTIF" : "NONAKTIF");
+        snprintf(aimLabel, sizeof(aimLabel), "[4] AIM ASSIST HEAD: [%s]", bAimAssistHead ? "AKTIF" : "NONAKTIF");
+        char godLabel[64];
+        snprintf(godLabel, sizeof(godLabel), "[6] GOD MODE / INVINCIBLE: [%s]", bGodModeActive ? "AKTIF" : "NONAKTIF");
 
-        const char* itemLabels[4] = {
-            "[1] SET UANG (INPUT MANUAL NOMINAL)",
-            "[2] CHEAT RESMI: HEALTH, ARMOR & UANG",
+        const char* itemLabels[7] = {
+            "[1] MENU CHEAT SENJATA (WEAPONS KIT)",
+            "[2] SET UANG (INPUT MANUAL NOMINAL)",
+            "[3] CHEAT RESMI: HEALTH, ARMOR & UANG",
             aimLabel,
+            "[5] CHEAT JETPACK (SPAWN JETPACK)",
+            godLabel,
             "[X] TUTUP MENU"
         };
-        CRGBA itemBgs[4] = {
+        CRGBA itemBgs[7] = {
+            CRGBA(20, 45, 75, 235),
             CRGBA(25, 40, 60, 235),
             CRGBA(20, 50, 32, 235),
             bAimAssistHead ? CRGBA(22, 68, 36, 235) : CRGBA(38, 42, 54, 235),
+            CRGBA(45, 30, 65, 235),
+            bGodModeActive ? CRGBA(75, 25, 25, 235) : CRGBA(42, 38, 50, 235),
             CRGBA(55, 22, 22, 235)
         };
-        CRGBA itemBorders[4] = {
+        CRGBA itemBorders[7] = {
+            CRGBA(100, 200, 255, 230),
             CRGBA(255, 215, 0, 230),
             CRGBA(60, 225, 105, 230),
             bAimAssistHead ? CRGBA(80, 255, 130, 240) : CRGBA(140, 155, 175, 200),
+            CRGBA(190, 120, 255, 230),
+            bGodModeActive ? CRGBA(255, 80, 80, 240) : CRGBA(160, 140, 190, 200),
             CRGBA(225, 70, 70, 230)
         };
-        CRGBA itemTextColors[4] = {
+        CRGBA itemTextColors[7] = {
+            CRGBA(180, 230, 255, 255),
             CRGBA(255, 235, 120, 255),
             CRGBA(140, 255, 160, 255),
             bAimAssistHead ? CRGBA(120, 255, 160, 255) : CRGBA(210, 220, 235, 255),
+            CRGBA(230, 190, 255, 255),
+            bGodModeActive ? CRGBA(255, 160, 160, 255) : CRGBA(220, 210, 240, 255),
             CRGBA(255, 130, 130, 255)
         };
 
@@ -624,7 +815,7 @@ void DrawNativeFloatingMenu()
             CRGBA border = isPressed ? CRGBA(255, 255, 255, 255) : itemBorders[globalIndex];
 
             DrawBorderedBox(itemLeft, rowTop, itemRight, rowBottom, bg, border, 2.0f * scaleRatio);
-            DrawTextAt(itemLeft + (20.0f * scaleRatio), rowTop + (13.0f * scaleRatio), itemLabels[globalIndex], 1.15f * scaleRatio, itemTextColors[globalIndex]);
+            DrawTextAt(itemLeft + (20.0f * scaleRatio), rowTop + (12.0f * scaleRatio), itemLabels[globalIndex], 1.15f * scaleRatio, itemTextColors[globalIndex]);
         }
 
         // Pagination Bar jika item menu melebihi MAX_ITEMS_PER_PAGE (10)
@@ -785,6 +976,99 @@ void DrawNativeFloatingMenu()
             DrawTextAt(winX + (25.0f * scaleRatio), winY + winH - (22.0f * scaleRatio), g_FeedbackMsg, 1.05f * scaleRatio, CRGBA(60, 255, 100, 255));
         }
     }
+    // 4. LAYAR MENU SENJATA KIT (SCREEN_WEAPONS_MENU)
+    else if (bNativeMenuOpen && g_CurrentMenuScreen == SCREEN_WEAPONS_MENU)
+    {
+        const int TOTAL_WEAPON_ITEMS = 8;
+        const char* wepLabels[TOTAL_WEAPON_ITEMS] = {
+            "[1] KIT 1: THUG TOOLS (BAT, 9MM, AK47, RPG)",
+            "[2] KIT 2: PROFESSIONAL (KNIFE, DEAGLE, M4, SNIPER)",
+            "[3] KIT 3: NUTTER TOOLS (CHAINSAW, SPAS, HEAT-SEEK)",
+            "[4] KIT 4: SPECIAL ARSENAL (MINIGUN & NV GOGGLES)",
+            "[5] MAX WEAPON SKILLS: HITMAN LEVEL SEMUA",
+            "[6] SENJATA BERAT: MINIGUN (9999 PELURU)",
+            "[7] MELEE & GEAR: KATANA + PARACHUTE",
+            "[< KEMBALI KE MENU UTAMA]"
+        };
+
+        CRGBA wepBgs[TOTAL_WEAPON_ITEMS] = {
+            CRGBA(25, 45, 65, 235),
+            CRGBA(22, 55, 45, 235),
+            CRGBA(50, 35, 60, 235),
+            CRGBA(65, 45, 20, 235),
+            CRGBA(20, 60, 35, 235),
+            CRGBA(70, 25, 25, 235),
+            CRGBA(35, 40, 55, 235),
+            CRGBA(55, 22, 22, 235)
+        };
+        CRGBA wepBorders[TOTAL_WEAPON_ITEMS] = {
+            CRGBA(100, 180, 255, 230),
+            CRGBA(60, 225, 140, 230),
+            CRGBA(200, 140, 255, 230),
+            CRGBA(255, 190, 50, 230),
+            CRGBA(80, 255, 120, 230),
+            CRGBA(255, 80, 80, 230),
+            CRGBA(140, 180, 240, 230),
+            CRGBA(240, 100, 100, 230)
+        };
+        CRGBA wepTextColors[TOTAL_WEAPON_ITEMS] = {
+            CRGBA(200, 230, 255, 255),
+            CRGBA(180, 255, 200, 255),
+            CRGBA(240, 200, 255, 255),
+            CRGBA(255, 235, 140, 255),
+            CRGBA(140, 255, 160, 255),
+            CRGBA(255, 180, 180, 255),
+            CRGBA(210, 230, 255, 255),
+            CRGBA(255, 140, 140, 255)
+        };
+
+        float menuW = 640.0f * scaleRatio;
+        float itemH = 48.0f * scaleRatio;
+        float itemGap = 8.0f * scaleRatio;
+        float headerH = 50.0f * scaleRatio;
+        float subH = 36.0f * scaleRatio;
+        float menuH = headerH + subH + (TOTAL_WEAPON_ITEMS * (itemH + itemGap)) + (35.0f * scaleRatio) + (g_FeedbackTimer > 0 ? 30.0f * scaleRatio : 0.0f);
+
+        float menuX = (g_ScreenWidth - menuW) * 0.5f;
+        float menuY = (g_ScreenHeight - menuH) * 0.5f;
+
+        // Background dan Border Jendela
+        DrawBorderedBox(menuX, menuY, menuX + menuW, menuY + menuH, CRGBA(12, 16, 24, 248), CRGBA(255, 180, 0, 255), 3.0f * scaleRatio);
+
+        // Header Title Bar
+        DrawFilledBox(menuX, menuY, menuX + menuW, menuY + headerH, CRGBA(20, 45, 80, 255));
+        DrawTextAt(menuX + (25.0f * scaleRatio), menuY + (12.0f * scaleRatio), "--- MENU CHEAT SENJATA (IDA PRO) ---", 1.20f * scaleRatio, CRGBA(255, 255, 255, 255));
+
+        // Subtitle Info Memory
+        DrawTextAt(menuX + (25.0f * scaleRatio), menuY + headerH + (7.0f * scaleRatio), "IDA ARM64: 0x3C1248 | 0x3C1508 | 0x3C178C | 0x59525C", 1.00f * scaleRatio, CRGBA(120, 215, 255, 255));
+
+        // Pemisah garis
+        DrawFilledBox(menuX + (12.0f * scaleRatio), menuY + headerH + subH, menuX + menuW - (12.0f * scaleRatio), menuY + headerH + subH + (2.0f * scaleRatio), CRGBA(255, 180, 0, 180));
+
+        float startY = menuY + headerH + subH + (10.0f * scaleRatio);
+        float itemLeft = menuX + (20.0f * scaleRatio);
+        float itemRight = menuX + menuW - (20.0f * scaleRatio);
+
+        for (int i = 0; i < TOTAL_WEAPON_ITEMS; ++i)
+        {
+            float rowTop = startY + i * (itemH + itemGap);
+            float rowBottom = rowTop + itemH;
+
+            bool isPressed = (g_PressedItem == 200 + i);
+            CRGBA bg = isPressed ? CRGBA(60, 150, 220, 255) : wepBgs[i];
+            CRGBA border = isPressed ? CRGBA(255, 255, 255, 255) : wepBorders[i];
+
+            DrawBorderedBox(itemLeft, rowTop, itemRight, rowBottom, bg, border, 2.0f * scaleRatio);
+            DrawTextAt(itemLeft + (16.0f * scaleRatio), rowTop + (12.0f * scaleRatio), wepLabels[i], 1.10f * scaleRatio, wepTextColors[i]);
+        }
+
+        // Pesan Feedback
+        if (g_FeedbackTimer > 0 && g_FeedbackMsg[0] != '\0')
+        {
+            --g_FeedbackTimer;
+            DrawTextAt(menuX + (25.0f * scaleRatio), menuY + menuH - (22.0f * scaleRatio), g_FeedbackMsg, 1.05f * scaleRatio, CRGBA(60, 255, 100, 255));
+        }
+    }
 }
 
 // -------------------------------------------------------------
@@ -897,25 +1181,38 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
                 {
                     if (g_PressedItem >= 0 && g_PressedItem == touchedRow)
                     {
-                        if (g_PressedItem == 0) // [1] SET UANG
+                        if (g_PressedItem == 0) // [1] MENU CHEAT SENJATA
+                        {
+                            g_CurrentMenuScreen = SCREEN_WEAPONS_MENU;
+                            g_FeedbackTimer = 0;
+                        }
+                        else if (g_PressedItem == 1) // [2] SET UANG
                         {
                             g_CurrentMenuScreen = SCREEN_MANUAL_SET_MONEY;
                             int32_t cMoney = GetCurrentPlayerMoney();
                             g_ManualInputMoney = (cMoney > 0) ? (int64_t)cMoney : (int64_t)targetMoney;
                             g_FeedbackTimer = 0;
                         }
-                        else if (g_PressedItem == 1) // [2] CHEAT RESMI
+                        else if (g_PressedItem == 2) // [3] CHEAT RESMI
                         {
                             TriggerOfficialCheat();
                         }
-                        else if (g_PressedItem == 2) // [3] AIM ASSIST HEAD
+                        else if (g_PressedItem == 3) // [4] AIM ASSIST HEAD
                         {
                             bAimAssistHead = !bAimAssistHead;
                             SaveMoneyConfig();
                             SetFeedback(bAimAssistHead ? ">> Aim Assist Head: DIAKTIFKAN!" : ">> Aim Assist Head: DINONAKTIFKAN!");
                             logger->Info("Aim Assist Head diubah: %d", bAimAssistHead);
                         }
-                        else if (g_PressedItem == 3) // [X] TUTUP MENU
+                        else if (g_PressedItem == 4) // [5] CHEAT JETPACK
+                        {
+                            TriggerJetpackCheat();
+                        }
+                        else if (g_PressedItem == 5) // [6] GOD MODE
+                        {
+                            TriggerGodModeCheat();
+                        }
+                        else if (g_PressedItem == 6) // [X] TUTUP MENU
                         {
                             bNativeMenuOpen = false;
                             g_CurrentMenuScreen = SCREEN_MAIN_MENU;
@@ -1127,6 +1424,86 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
                 return true;
             }
         }
+        else if (g_CurrentMenuScreen == SCREEN_WEAPONS_MENU)
+        {
+            const int TOTAL_WEAPON_ITEMS = 8;
+            float menuW = 640.0f * scaleRatio;
+            float itemH = 48.0f * scaleRatio;
+            float itemGap = 8.0f * scaleRatio;
+            float headerH = 50.0f * scaleRatio;
+            float subH = 36.0f * scaleRatio;
+            float menuH = headerH + subH + (TOTAL_WEAPON_ITEMS * (itemH + itemGap)) + (35.0f * scaleRatio) + (g_FeedbackTimer > 0 ? 30.0f * scaleRatio : 0.0f);
+
+            float menuX = (g_ScreenWidth - menuW) * 0.5f;
+            float menuY = (g_ScreenHeight - menuH) * 0.5f;
+
+            bool insideWindow = (x >= menuX && x <= menuX + menuW && y >= menuY && y <= menuY + menuH);
+
+            if (insideWindow)
+            {
+                float startY = menuY + headerH + subH + (10.0f * scaleRatio);
+                float itemLeft = menuX + (20.0f * scaleRatio);
+                float itemRight = menuX + menuW - (20.0f * scaleRatio);
+
+                int touchedWep = -1;
+
+                for (int i = 0; i < TOTAL_WEAPON_ITEMS; ++i)
+                {
+                    float rowTop = startY + i * (itemH + itemGap);
+                    float rowBottom = rowTop + itemH;
+                    if (x >= itemLeft && x <= itemRight && y >= rowTop && y <= rowBottom)
+                    {
+                        touchedWep = 200 + i;
+                        break;
+                    }
+                }
+
+                if (actionType == 2) // TOUCH_PUSH
+                {
+                    g_PressedItem = touchedWep;
+                }
+                else if (actionType == 1) // TOUCH_RELEASE
+                {
+                    if (g_PressedItem >= 200 && g_PressedItem == touchedWep)
+                    {
+                        int wepIndex = g_PressedItem - 200;
+                        if (wepIndex >= 0 && wepIndex <= 3) // Kit 1 - 4
+                        {
+                            TriggerWeaponCheat(wepIndex + 1);
+                        }
+                        else if (wepIndex == 4) // Max Weapon Skills
+                        {
+                            TriggerWeaponCheat(5);
+                        }
+                        else if (wepIndex == 5) // Minigun 9999
+                        {
+                            TriggerWeaponCheat(6);
+                        }
+                        else if (wepIndex == 6) // Katana + Parachute
+                        {
+                            TriggerWeaponCheat(7);
+                        }
+                        else if (wepIndex == 7) // Kembali ke Menu Utama
+                        {
+                            g_CurrentMenuScreen = SCREEN_MAIN_MENU;
+                            g_FeedbackTimer = 0;
+                        }
+                    }
+                    g_PressedItem = -1;
+                }
+                return true;
+            }
+            else
+            {
+                if (actionType == 1) // TOUCH_RELEASE
+                {
+                    bNativeMenuOpen = false;
+                    g_PressedItem = -1;
+                    g_CurrentMenuScreen = SCREEN_MAIN_MENU;
+                }
+                return true;
+            }
+        }
     }
 
     // 3. Gesture Geser Turun (CLEO Swipe Down: dari TOP CENTER layar ke bawah)
@@ -1314,6 +1691,54 @@ void RenderImGuiMenuContent()
     }
 
     pImGui->Separator();
+    pImGui->TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "Cheat Senjata Kit (IDA Pro):");
+
+    if (pImGui->Button("Kit 1: Thug Tools (0x3C1248)", ImVec2(pImGui->GetScaledX(240), 0)))
+    {
+        TriggerWeaponCheat(1);
+    }
+    pImGui->SameLine();
+    if (pImGui->Button("Kit 2: Professional (0x3C1508)", ImVec2(pImGui->GetScaledX(240), 0)))
+    {
+        TriggerWeaponCheat(2);
+    }
+
+    if (pImGui->Button("Kit 3: Nutter Tools (0x3C178C)", ImVec2(pImGui->GetScaledX(240), 0)))
+    {
+        TriggerWeaponCheat(3);
+    }
+    pImGui->SameLine();
+    if (pImGui->Button("Kit 4: Special Arsenal (0x3C199C)", ImVec2(pImGui->GetScaledX(240), 0)))
+    {
+        TriggerWeaponCheat(4);
+    }
+
+    if (pImGui->Button("Max Weapon Skills (0x3C2E90)", ImVec2(pImGui->GetScaledX(240), 0)))
+    {
+        TriggerWeaponCheat(5);
+    }
+    pImGui->SameLine();
+    if (pImGui->Button("Minigun 9999 Peluru (0x59525C)", ImVec2(pImGui->GetScaledX(240), 0)))
+    {
+        TriggerWeaponCheat(6);
+    }
+
+    if (pImGui->Button("Katana + Parachute", ImVec2(pImGui->GetScaledX(240), 0)))
+    {
+        TriggerWeaponCheat(7);
+    }
+    pImGui->SameLine();
+    if (pImGui->Button("Spawn Jetpack (0x3C2A40)", ImVec2(pImGui->GetScaledX(240), 0)))
+    {
+        TriggerJetpackCheat();
+    }
+
+    if (pImGui->Checkbox("God Mode / Invincible (0x3C1AB0)", &bGodModeActive))
+    {
+        TriggerGodModeCheat();
+    }
+
+    pImGui->Separator();
     if (pImGui->Button("Simpan Pengaturan (.ini)", ImVec2(pImGui->GetScaledX(180), 0)))
     {
         SaveMoneyConfig();
@@ -1450,6 +1875,55 @@ extern "C" void OnModLoad()
     {
         logger->Error("Symbol CCheat::MoneyArmourHealthCheat tidak ditemukan di libGTASA.so!");
     }
+
+    // Resolusi Weapon Cheats lewat Simbol & Alamat Memori Langsung dari IDA Pro
+    // (Berdasarkan hasil analisa libGTASA.so ARM64 64-bit & ARMv7 32-bit di IDA Pro)
+    #if defined(AML32) || defined(__arm__) || !defined(__LP64__)
+        const uintptr_t OFF_WEAPON1     = 0x2BF994;
+        const uintptr_t OFF_WEAPON2     = 0x2BFA08;
+        const uintptr_t OFF_WEAPON3     = 0x2BFA7C;
+        const uintptr_t OFF_WEAPON4     = 0x2BFAF0;
+        const uintptr_t OFF_SKILLS      = 0x2C0BE8;
+        const uintptr_t OFF_JETPACK     = 0x2C09C0;
+        const uintptr_t OFF_INVINCIBLE  = 0x2BF8E4;
+        const uintptr_t OFF_GIVEWEAPON  = 0x43D698;
+    #else
+        const uintptr_t OFF_WEAPON1     = 0x3C1248; // _ZN6CCheat12WeaponCheat1Ev
+        const uintptr_t OFF_WEAPON2     = 0x3C1508; // _ZN6CCheat12WeaponCheat2Ev
+        const uintptr_t OFF_WEAPON3     = 0x3C178C; // _ZN6CCheat12WeaponCheat3Ev
+        const uintptr_t OFF_WEAPON4     = 0x3C199C; // _ZN6CCheat12WeaponCheat4Ev
+        const uintptr_t OFF_SKILLS      = 0x3C2E90; // _ZN6CCheat17WeaponSkillsCheatEv
+        const uintptr_t OFF_JETPACK     = 0x3C2A40; // _ZN6CCheat12JetpackCheatEv
+        const uintptr_t OFF_INVINCIBLE  = 0x3C1AB0; // _ZN6CCheat25TogglePlayerInvincibilityEv
+        const uintptr_t OFF_GIVEWEAPON  = 0x59525C; // _ZN4CPed10GiveWeaponE11eWeaponTypejb
+    #endif
+
+    auto ResolveCheatFunc = [](uintptr_t base, const char* symName, uintptr_t offset) -> uintptr_t {
+        uintptr_t fn = aml->GetSym(base, symName);
+        if (fn)
+        {
+            logger->Info("[IDA] Simbol '%s' berhasil ditemukan di alamat: %p", symName, (void*)fn);
+            return fn;
+        }
+        if (offset && base)
+        {
+            fn = base + offset;
+            logger->Info("[IDA] Simbol '%s' memakai alamat offset IDA Pro: %p (base + 0x%lX)",
+                         symName, (void*)fn, (unsigned long)offset);
+            return fn;
+        }
+        logger->Error("[IDA] Gagal meresolusi simbol '%s'!", symName);
+        return 0;
+    };
+
+    CCheat_WeaponCheat1 = (CCheat_WeaponCheat1_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat12WeaponCheat1Ev", OFF_WEAPON1);
+    CCheat_WeaponCheat2 = (CCheat_WeaponCheat2_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat12WeaponCheat2Ev", OFF_WEAPON2);
+    CCheat_WeaponCheat3 = (CCheat_WeaponCheat3_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat12WeaponCheat3Ev", OFF_WEAPON3);
+    CCheat_WeaponCheat4 = (CCheat_WeaponCheat4_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat12WeaponCheat4Ev", OFF_WEAPON4);
+    CCheat_WeaponSkillsCheat = (CCheat_WeaponSkillsCheat_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat17WeaponSkillsCheatEv", OFF_SKILLS);
+    CCheat_JetpackCheat = (CCheat_JetpackCheat_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat12JetpackCheatEv", OFF_JETPACK);
+    CCheat_TogglePlayerInvincibility = (CCheat_TogglePlayerInvincibility_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat25TogglePlayerInvincibilityEv", OFF_INVINCIBLE);
+    CPed_GiveWeapon = (CPed_GiveWeapon_fn)ResolveCheatFunc(pGTASA, "_ZN4CPed10GiveWeaponE11eWeaponTypejb", OFF_GIVEWEAPON);
 
     // Resolusi symbol untuk Aim Assist Head
     IsPedPointerValid = (IsPedPointerValid_fn)aml->GetSym(pGTASA, "_Z17IsPedPointerValidP4CPed");
