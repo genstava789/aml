@@ -4,13 +4,14 @@
 #include "iimgui.h"
 #include <algorithm>
 #include <string.h>
+#include <math.h>
 
 MYMOD(com.example.infinitemoney, Infinite Money Mod, 1.3, YourName)
 NEEDGAME(com.rockstargames.gtasa)
 
 uintptr_t pGTASA = 0;
 
-// Structures for native GTA 2D rendering
+// Structures for native GTA 2D rendering & 3D Vector
 struct CRGBA
 {
     unsigned char r, g, b, a;
@@ -27,6 +28,30 @@ struct CRect
     CRect(float _left, float _top, float _right, float _bottom)
         : left(_left), bottom(_bottom), right(_right), top(_top) {}
     CRect() : left(0), bottom(0), right(0), top(0) {}
+};
+
+struct CVector
+{
+    float x, y, z;
+    CVector() : x(0.0f), y(0.0f), z(0.0f) {}
+    CVector(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
+};
+
+inline float GetDistance3D(const CVector& a, const CVector& b)
+{
+    float dx = a.x - b.x;
+    float dy = a.y - b.y;
+    float dz = a.z - b.z;
+    return sqrtf(dx * dx + dy * dy + dz * dz);
+}
+
+struct CPoolGeneric
+{
+    void* m_pObjects;
+    uint8_t* m_byteMap;
+    int32_t m_nSize;
+    int32_t m_nFirstFree;
+    bool m_bOwnsAllocations;
 };
 
 struct RsGlobalType
@@ -50,6 +75,18 @@ FindPlayerPed_fn FindPlayerPed = nullptr;
 
 typedef void (*CCheat_MoneyArmourHealthCheat_fn)();
 CCheat_MoneyArmourHealthCheat_fn CCheat_MoneyArmourHealthCheat = nullptr;
+
+typedef bool (*IsPedPointerValid_fn)(void* pPed);
+IsPedPointerValid_fn IsPedPointerValid = nullptr;
+
+typedef void (*CPed_GetBonePosition_fn)(uintptr_t pPed, CVector& outPosn, unsigned int boneTag, bool bCalledFromCamera);
+CPed_GetBonePosition_fn CPed_GetBonePosition = nullptr;
+
+typedef void (*CCamera_UpdateAimingCoors_fn)(uintptr_t pCamera, const CVector* pNewAimingCoors);
+CCamera_UpdateAimingCoors_fn CCamera_UpdateAimingCoors = nullptr;
+CCamera_UpdateAimingCoors_fn Orig_CCamera_UpdateAimingCoors = nullptr;
+
+CPoolGeneric** pPedPoolPtr = nullptr;
 
 typedef void (*CSprite2d_DrawRect_fn)(const CRect&, const CRGBA&);
 CSprite2d_DrawRect_fn CSprite2d_DrawRect = nullptr;
@@ -97,6 +134,7 @@ float g_ScreenHeight = 1080.0f;
 int32_t targetMoney = 2000000;       // Default: $2.000.000
 bool bDynamicInfiniteMoney = true;  // Pertahankan uang minimal sebesar targetMoney
 bool bForceExactMoney = false;      // Selalu paksa uang tepat sebesar targetMoney
+bool bAimAssistHead = false;        // Aim Assist Headshot otomatis
 bool bHasLoggedThisSession = false;
 
 // Native Floating CLEO-style Menu State
@@ -129,18 +167,27 @@ Config* pConfig = nullptr;
 ConfigEntry* entryTarget = nullptr;
 ConfigEntry* entryInfinite = nullptr;
 ConfigEntry* entryForce = nullptr;
+ConfigEntry* entryAimAssist = nullptr;
 
-// Offset memori CPlayerInfo disesuaikan per arsitektur (32-bit vs 64-bit)
+// Offset memori CPlayerInfo & CPlayerPed disesuaikan per arsitektur (32-bit vs 64-bit)
 #if defined(AML32) || defined(__arm__) || !defined(__LP64__)
-    static constexpr size_t PLAYER_INFO_SIZE     = 0x194;
-    static constexpr size_t OFFSET_PED           = 0x0;
-    static constexpr size_t OFFSET_MONEY         = 0xB8;
-    static constexpr size_t OFFSET_DISPLAY_MONEY = 0xBC;
+    static constexpr size_t PLAYER_INFO_SIZE          = 0x194;
+    static constexpr size_t OFFSET_PED                = 0x0;
+    static constexpr size_t OFFSET_MONEY              = 0xB8;
+    static constexpr size_t OFFSET_DISPLAY_MONEY      = 0xBC;
+    static constexpr size_t OFFSET_TARGETTED_PED      = 0x7A4;
+    static constexpr size_t OFFSET_TARGETTED_PED_MIN  = 0x798;
+    static constexpr size_t OFFSET_TARGETTED_PED_MAX  = 0x7AC;
+    static constexpr size_t SIZEOF_CPED               = 0x7A4;
 #else
-    static constexpr size_t PLAYER_INFO_SIZE     = 0x1D8;
-    static constexpr size_t OFFSET_PED           = 0x0;
-    static constexpr size_t OFFSET_MONEY         = 0xF0;
-    static constexpr size_t OFFSET_DISPLAY_MONEY = 0xF4;
+    static constexpr size_t PLAYER_INFO_SIZE          = 0x1D8;
+    static constexpr size_t OFFSET_PED                = 0x0;
+    static constexpr size_t OFFSET_MONEY              = 0xF0;
+    static constexpr size_t OFFSET_DISPLAY_MONEY      = 0xF4;
+    static constexpr size_t OFFSET_TARGETTED_PED      = 0x988;
+    static constexpr size_t OFFSET_TARGETTED_PED_MIN  = 0x978;
+    static constexpr size_t OFFSET_TARGETTED_PED_MAX  = 0x998;
+    static constexpr size_t SIZEOF_CPED               = 0x988;
 #endif
 
 // Helper untuk konversi ASCII ke GxtChar (unsigned short)
@@ -205,8 +252,10 @@ void SaveMoneyConfig()
         entryTarget->SetInt(targetMoney);
         entryInfinite->SetBool(bDynamicInfiniteMoney);
         entryForce->SetBool(bForceExactMoney);
+        if (entryAimAssist) entryAimAssist->SetBool(bAimAssistHead);
         pConfig->Save();
-        logger->Info("Konfigurasi disimpan: Target=%d, Dynamic=%d, Force=%d", targetMoney, bDynamicInfiniteMoney, bForceExactMoney);
+        logger->Info("Konfigurasi disimpan: Target=%d, Dynamic=%d, Force=%d, AimAssist=%d",
+                     targetMoney, bDynamicInfiniteMoney, bForceExactMoney, bAimAssistHead);
         bConfigSavedNotice = true;
     }
 }
@@ -316,30 +365,135 @@ void TriggerOfficialCheat()
 }
 
 // -------------------------------------------------------------
-// Definisi Menu Utama Bersih (Hanya 2 Fitur Utama + Tutup)
+// Aim Assist Headshot (Otomatis Bidik Kepala NPC)
+// Menggunakan CCamera::UpdateAimingCoors & CPed::GetBonePosition
 // -------------------------------------------------------------
-struct MainMenuItemDef
+uintptr_t GetPlayerTargetedPed(uintptr_t playerPed)
 {
-    const char* label;
-    int actionId;
-    CRGBA bgColor;
-    CRGBA borderColor;
-    CRGBA textColor;
-};
+    if (!playerPed) return 0;
 
+    // Cek offset targetted ped standar
+    uintptr_t candidate = *(uintptr_t*)(playerPed + OFFSET_TARGETTED_PED);
+    if (candidate > 0x100000 && candidate != playerPed)
+    {
+        if (!IsPedPointerValid || IsPedPointerValid((void*)candidate))
+        {
+            return candidate;
+        }
+    }
+
+    // Scan toleransi padding di sekitarnya hanya jika IsPedPointerValid tersedia
+    if (IsPedPointerValid)
+    {
+        for (size_t off = OFFSET_TARGETTED_PED_MIN; off <= OFFSET_TARGETTED_PED_MAX; off += sizeof(void*))
+        {
+            uintptr_t c = *(uintptr_t*)(playerPed + off);
+            if (c > 0x100000 && c != playerPed && IsPedPointerValid((void*)c))
+            {
+                return c;
+            }
+        }
+    }
+
+    return 0;
+}
+
+uintptr_t FindClosestPedToPoint(const CVector& point, uintptr_t ignorePed, float maxDistance)
+{
+    if (!pPedPoolPtr || !*pPedPoolPtr || !CPed_GetBonePosition) return 0;
+    CPoolGeneric* pool = *pPedPoolPtr;
+    if (!pool || !pool->m_pObjects || !pool->m_byteMap || pool->m_nSize <= 0 || pool->m_nSize > 500) return 0;
+
+    uintptr_t bestPed = 0;
+    float bestDist = maxDistance;
+
+    for (int i = 0; i < pool->m_nSize; ++i)
+    {
+        if (pool->m_byteMap[i] & 0x80) continue; // slot kosong
+
+        uintptr_t ped = (uintptr_t)pool->m_pObjects + (i * SIZEOF_CPED);
+        if (ped == ignorePed || ped < 0x100000) continue;
+        if (IsPedPointerValid && !IsPedPointerValid((void*)ped)) continue;
+
+        CVector head(0.0f, 0.0f, 0.0f);
+        CPed_GetBonePosition(ped, head, 8, false); // 8 = BONE_HEAD
+        if (head.x == 0.0f && head.y == 0.0f && head.z == 0.0f) continue;
+
+        float d = GetDistance3D(head, point);
+        if (d < bestDist)
+        {
+            bestDist = d;
+            bestPed = ped;
+        }
+    }
+    return bestPed;
+}
+
+void Hooked_CCamera_UpdateAimingCoors(uintptr_t camera, const CVector* pNewAimingCoors)
+{
+    if (!bAimAssistHead || !pNewAimingCoors || !IsPlayerInGame())
+    {
+        if (Orig_CCamera_UpdateAimingCoors) Orig_CCamera_UpdateAimingCoors(camera, pNewAimingCoors);
+        return;
+    }
+
+    uintptr_t localPlayer = GetLocalPlayerPtr();
+    if (!localPlayer)
+    {
+        if (Orig_CCamera_UpdateAimingCoors) Orig_CCamera_UpdateAimingCoors(camera, pNewAimingCoors);
+        return;
+    }
+
+    uintptr_t playerPed = *(uintptr_t*)(localPlayer + OFFSET_PED);
+    if (!playerPed)
+    {
+        if (Orig_CCamera_UpdateAimingCoors) Orig_CCamera_UpdateAimingCoors(camera, pNewAimingCoors);
+        return;
+    }
+
+    // 1. Dapatkan NPC yang sedang dibidik / dikunci oleh pemain
+    uintptr_t targetPed = GetPlayerTargetedPed(playerPed);
+
+    // 2. Jika tidak terkunci otomatis, cari NPC terdekat dari titik bidikan crosshair
+    if (!targetPed && pPedPoolPtr && *pPedPoolPtr && CPed_GetBonePosition)
+    {
+        targetPed = FindClosestPedToPoint(*pNewAimingCoors, playerPed, 3.5f);
+    }
+
+    // 3. Alihkan koordinat bidikan kamera langsung ke kepala NPC (Bone 8: BONE_HEAD)
+    if (targetPed && CPed_GetBonePosition)
+    {
+        CVector headPos(0.0f, 0.0f, 0.0f);
+        CPed_GetBonePosition(targetPed, headPos, 8, false); // Bone 8 = BONE_HEAD
+
+        if (headPos.x != 0.0f || headPos.y != 0.0f || headPos.z != 0.0f)
+        {
+            if (Orig_CCamera_UpdateAimingCoors)
+            {
+                Orig_CCamera_UpdateAimingCoors(camera, &headPos);
+                return;
+            }
+        }
+    }
+
+    if (Orig_CCamera_UpdateAimingCoors)
+    {
+        Orig_CCamera_UpdateAimingCoors(camera, pNewAimingCoors);
+    }
+}
+
+// -------------------------------------------------------------
+// Definisi Menu Utama
+// -------------------------------------------------------------
 enum MainMenuAction
 {
     ACTION_OPEN_SET_MONEY = 1,
     ACTION_TRIGGER_OFFICIAL_CHEAT = 2,
-    ACTION_CLOSE_MENU = 3
+    ACTION_TOGGLE_AIM_ASSIST = 3,
+    ACTION_CLOSE_MENU = 4
 };
 
-const MainMenuItemDef g_MainMenuItems[] = {
-    { "[1] SET UANG (INPUT MANUAL NOMINAL)", ACTION_OPEN_SET_MONEY,         CRGBA(25, 40, 60, 235), CRGBA(255, 215, 0, 230), CRGBA(255, 235, 120, 255) },
-    { "[2] CHEAT RESMI: HEALTH, ARMOR & UANG", ACTION_TRIGGER_OFFICIAL_CHEAT, CRGBA(20, 50, 32, 235), CRGBA(60, 225, 105, 230), CRGBA(140, 255, 160, 255) },
-    { "[X] TUTUP MENU",                       ACTION_CLOSE_MENU,             CRGBA(55, 22, 22, 235), CRGBA(225, 70, 70, 230), CRGBA(255, 130, 130, 255) }
-};
-const int TOTAL_MENU_ITEMS = sizeof(g_MainMenuItems) / sizeof(g_MainMenuItems[0]);
+const int TOTAL_MENU_ITEMS = 4;
 const int MAX_ITEMS_PER_PAGE = 10; // Mendukung pagination otomatis jika menu melebihi 10 item!
 
 // -------------------------------------------------------------
@@ -424,6 +578,35 @@ void DrawNativeFloatingMenu()
         // Pemisah garis
         DrawFilledBox(menuX + (12.0f * scaleRatio), menuY + headerH + subH, menuX + menuW - (12.0f * scaleRatio), menuY + headerH + subH + (2.0f * scaleRatio), CRGBA(255, 215, 0, 180));
 
+        // Label & Gaya Dinamis Tombol Menu
+        char aimLabel[64];
+        snprintf(aimLabel, sizeof(aimLabel), "[3] AIM ASSIST HEAD: [%s]", bAimAssistHead ? "AKTIF" : "NONAKTIF");
+
+        const char* itemLabels[4] = {
+            "[1] SET UANG (INPUT MANUAL NOMINAL)",
+            "[2] CHEAT RESMI: HEALTH, ARMOR & UANG",
+            aimLabel,
+            "[X] TUTUP MENU"
+        };
+        CRGBA itemBgs[4] = {
+            CRGBA(25, 40, 60, 235),
+            CRGBA(20, 50, 32, 235),
+            bAimAssistHead ? CRGBA(22, 68, 36, 235) : CRGBA(38, 42, 54, 235),
+            CRGBA(55, 22, 22, 235)
+        };
+        CRGBA itemBorders[4] = {
+            CRGBA(255, 215, 0, 230),
+            CRGBA(60, 225, 105, 230),
+            bAimAssistHead ? CRGBA(80, 255, 130, 240) : CRGBA(140, 155, 175, 200),
+            CRGBA(225, 70, 70, 230)
+        };
+        CRGBA itemTextColors[4] = {
+            CRGBA(255, 235, 120, 255),
+            CRGBA(140, 255, 160, 255),
+            bAimAssistHead ? CRGBA(120, 255, 160, 255) : CRGBA(210, 220, 235, 255),
+            CRGBA(255, 130, 130, 255)
+        };
+
         // Daftar Tombol Aksi Menu Sesuai Halaman Aktif
         float startY = menuY + headerH + subH + (12.0f * scaleRatio);
         float itemLeft = menuX + (20.0f * scaleRatio);
@@ -432,17 +615,16 @@ void DrawNativeFloatingMenu()
         for (int i = 0; i < itemsOnPage; ++i)
         {
             int globalIndex = startIndex + i;
-            const auto& def = g_MainMenuItems[globalIndex];
 
             float rowTop = startY + i * (itemH + itemGap);
             float rowBottom = rowTop + itemH;
 
             bool isPressed = (g_PressedItem == globalIndex);
-            CRGBA bg = isPressed ? CRGBA(60, 170, 85, 255) : def.bgColor;
-            CRGBA border = isPressed ? CRGBA(255, 255, 255, 255) : def.borderColor;
+            CRGBA bg = isPressed ? CRGBA(60, 170, 85, 255) : itemBgs[globalIndex];
+            CRGBA border = isPressed ? CRGBA(255, 255, 255, 255) : itemBorders[globalIndex];
 
             DrawBorderedBox(itemLeft, rowTop, itemRight, rowBottom, bg, border, 2.0f * scaleRatio);
-            DrawTextAt(itemLeft + (20.0f * scaleRatio), rowTop + (13.0f * scaleRatio), def.label, 1.15f * scaleRatio, def.textColor);
+            DrawTextAt(itemLeft + (20.0f * scaleRatio), rowTop + (13.0f * scaleRatio), itemLabels[globalIndex], 1.15f * scaleRatio, itemTextColors[globalIndex]);
         }
 
         // Pagination Bar jika item menu melebihi MAX_ITEMS_PER_PAGE (10)
@@ -726,7 +908,14 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
                         {
                             TriggerOfficialCheat();
                         }
-                        else if (g_PressedItem == 2) // [X] TUTUP MENU
+                        else if (g_PressedItem == 2) // [3] AIM ASSIST HEAD
+                        {
+                            bAimAssistHead = !bAimAssistHead;
+                            SaveMoneyConfig();
+                            SetFeedback(bAimAssistHead ? ">> Aim Assist Head: DIAKTIFKAN!" : ">> Aim Assist Head: DINONAKTIFKAN!");
+                            logger->Info("Aim Assist Head diubah: %d", bAimAssistHead);
+                        }
+                        else if (g_PressedItem == 3) // [X] TUTUP MENU
                         {
                             bNativeMenuOpen = false;
                             g_CurrentMenuScreen = SCREEN_MAIN_MENU;
@@ -1233,13 +1422,16 @@ extern "C" void OnModLoad()
         entryTarget = pConfig->Bind("TargetMoney", targetMoney, "MoneyCheat");
         entryInfinite = pConfig->Bind("DynamicInfiniteMoney", bDynamicInfiniteMoney, "MoneyCheat");
         entryForce = pConfig->Bind("ForceExactMoney", bForceExactMoney, "MoneyCheat");
+        entryAimAssist = pConfig->Bind("AimAssistHead", bAimAssistHead, "AimAssist");
 
         if (entryTarget) targetMoney = entryTarget->GetInt();
         if (entryInfinite) bDynamicInfiniteMoney = entryInfinite->GetBool();
         if (entryForce) bForceExactMoney = entryForce->GetBool();
+        if (entryAimAssist) bAimAssistHead = entryAimAssist->GetBool();
 
         pConfig->Save();
-        logger->Info("Konfigurasi dimuat: TargetMoney=%d, Dynamic=%d, Force=%d", targetMoney, bDynamicInfiniteMoney, bForceExactMoney);
+        logger->Info("Konfigurasi dimuat: TargetMoney=%d, Dynamic=%d, Force=%d, AimAssist=%d",
+                     targetMoney, bDynamicInfiniteMoney, bForceExactMoney, bAimAssistHead);
     }
 
     // Resolusi symbol pemain dan layar
@@ -1257,6 +1449,22 @@ extern "C" void OnModLoad()
     else
     {
         logger->Error("Symbol CCheat::MoneyArmourHealthCheat tidak ditemukan di libGTASA.so!");
+    }
+
+    // Resolusi symbol untuk Aim Assist Head
+    IsPedPointerValid = (IsPedPointerValid_fn)aml->GetSym(pGTASA, "_Z17IsPedPointerValidP4CPed");
+    CPed_GetBonePosition = (CPed_GetBonePosition_fn)aml->GetSym(pGTASA, "_ZN4CPed15GetBonePositionER5RwV3djb");
+    pPedPoolPtr = (CPoolGeneric**)aml->GetSym(pGTASA, "_ZN6CPools10ms_pPedPoolE");
+
+    uintptr_t pUpdateAimingCoors = aml->GetSym(pGTASA, "_ZN7CCamera17UpdateAimingCoorsERK7CVector");
+    if (pUpdateAimingCoors)
+    {
+        aml->Hook((void*)pUpdateAimingCoors, (void*)Hooked_CCamera_UpdateAimingCoors, (void**)&Orig_CCamera_UpdateAimingCoors);
+        logger->Info("Hook CCamera::UpdateAimingCoors (_ZN7CCamera17UpdateAimingCoorsERK7CVector) berhasil!");
+    }
+    else
+    {
+        logger->Error("Symbol CCamera::UpdateAimingCoors tidak ditemukan di libGTASA.so!");
     }
 
     if (pRsGlobal && pRsGlobal->maximumWidth > 0)
