@@ -55,7 +55,7 @@ CFont_PrintString_fn CFont_PrintString = nullptr;
 typedef void (*CFont_RenderFontBuffer_fn)();
 CFont_RenderFontBuffer_fn CFont_RenderFontBuffer = nullptr;
 
-typedef void (*CFont_SetColor_fn)(CRGBA);
+typedef void (*CFont_SetColor_fn)(const CRGBA&);
 CFont_SetColor_fn CFont_SetColor = nullptr;
 
 typedef void (*CFont_SetScale_fn)(float);
@@ -70,7 +70,7 @@ CFont_SetOrientation_fn CFont_SetOrientation = nullptr;
 typedef void (*CFont_SetEdge_fn)(int8_t);
 CFont_SetEdge_fn CFont_SetEdge = nullptr;
 
-typedef void (*CFont_SetDropColor_fn)(CRGBA);
+typedef void (*CFont_SetDropColor_fn)(const CRGBA&);
 CFont_SetDropColor_fn CFont_SetDropColor = nullptr;
 
 typedef void (*CFont_SetProportional_fn)(uint8_t);
@@ -199,14 +199,14 @@ void SetFeedback(const char* msg)
 // -------------------------------------------------------------
 // Native GTA 2D Drawing Helpers
 // -------------------------------------------------------------
-void DrawFilledBox(float left, float top, float right, float bottom, CRGBA color)
+void DrawFilledBox(float left, float top, float right, float bottom, const CRGBA& color)
 {
     if (!CSprite2d_DrawRect) return;
     CRect rect(left, top, right, bottom);
     CSprite2d_DrawRect(rect, color);
 }
 
-void DrawBorderedBox(float left, float top, float right, float bottom, CRGBA bgColor, CRGBA borderColor, float borderSize = 2.0f)
+void DrawBorderedBox(float left, float top, float right, float bottom, const CRGBA& bgColor, const CRGBA& borderColor, float borderSize = 2.0f)
 {
     DrawFilledBox(left, top, right, bottom, bgColor);
     DrawFilledBox(left, top, right, top + borderSize, borderColor);
@@ -215,19 +215,21 @@ void DrawBorderedBox(float left, float top, float right, float bottom, CRGBA bgC
     DrawFilledBox(right - borderSize, top, right, bottom, borderColor);
 }
 
-void DrawTextAt(float x, float y, const char* text, float scale, CRGBA color, uint8_t style = 1, uint8_t orientation = 1)
+void DrawTextAt(float x, float y, const char* text, float scale, const CRGBA& color, uint8_t style = 1, uint8_t orientation = 1)
 {
     if (!CFont_PrintString || !CFont_RenderFontBuffer) return;
 
     unsigned short gxtBuf[160];
     ConvertAsciiToGxt(text, gxtBuf, 160);
 
+    CRGBA dropColor(0, 0, 0, 255);
+
     if (CFont_SetScale) CFont_SetScale(scale);
     if (CFont_SetColor) CFont_SetColor(color);
     if (CFont_SetFontStyle) CFont_SetFontStyle(style);
     if (CFont_SetOrientation) CFont_SetOrientation(orientation);
     if (CFont_SetEdge) CFont_SetEdge(1);
-    if (CFont_SetDropColor) CFont_SetDropColor(CRGBA(0, 0, 0, 255));
+    if (CFont_SetDropColor) CFont_SetDropColor(dropColor);
     if (CFont_SetWrapx) CFont_SetWrapx(10000.0f);
     if (CFont_SetProportional) CFont_SetProportional(1);
 
@@ -241,6 +243,10 @@ void DrawTextAt(float x, float y, const char* text, float scale, CRGBA color, ui
 void DrawNativeFloatingMenu()
 {
     if (!CSprite2d_DrawRect || !CFont_PrintString) return;
+
+    // HANYA GAMBAR JIKA PLAYER SUDAH DI DALAM GAMEPLAY!
+    // Ini mencegah crash saat di layar FrontendIdle / Main Menu / Loading!
+    if (!IsPlayerInGame()) return;
 
     // Perbarui resolusi layar dari RsGlobal jika tersedia
     if (pRsGlobal && pRsGlobal->maximumWidth > 0 && pRsGlobal->maximumHeight > 0)
@@ -537,11 +543,20 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
 void Hooked_CHud_DrawAfterFade()
 {
     if (CHud_DrawAfterFade) CHud_DrawAfterFade();
-    DrawNativeFloatingMenu();
+    if (IsPlayerInGame())
+    {
+        DrawNativeFloatingMenu();
+    }
 }
 
 void Hooked_AND_TouchEvent(int actionType, int trackNum, int x, int y)
 {
+    if (!IsPlayerInGame())
+    {
+        if (AND_TouchEvent) AND_TouchEvent(actionType, trackNum, x, y);
+        return;
+    }
+
     // Catat resolusi dari sentuhan jika lebih tinggi
     if ((float)x > g_ScreenWidth) g_ScreenWidth = (float)x;
     if ((float)y > g_ScreenHeight) g_ScreenHeight = (float)y;
