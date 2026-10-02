@@ -133,13 +133,21 @@ ConfigEntry* entryForce = nullptr;
 // Helper untuk konversi ASCII ke GxtChar (unsigned short)
 inline void ConvertAsciiToGxt(const char* src, unsigned short* dst, size_t maxLen)
 {
+    if (!src || !dst || maxLen < 2) return;
     size_t i = 0;
-    while (src[i] && i < maxLen - 1)
+    while (src[i] && i < maxLen - 2)
     {
-        dst[i] = (unsigned short)(unsigned char)src[i];
+        char c = src[i];
+        // CFont GTA SA menggunakan '~' untuk token formatting (~r~, ~g~, ~w~, dll).
+        // Tilde tunggal atau tidak berpasangan akan membuat CFont::ParseToken
+        // membaca memori melampaui buffer dan menyebabkan SIGSEGV!
+        if (c == '~') c = '-';
+        dst[i] = (unsigned short)(unsigned char)c;
         ++i;
     }
+    // GXT strings di GTA SA memerlukan null-termination ganda untuk keamanan ekstra
     dst[i] = 0;
+    dst[i + 1] = 0;
 }
 
 uintptr_t GetLocalPlayerPtr()
@@ -217,10 +225,11 @@ void DrawBorderedBox(float left, float top, float right, float bottom, const CRG
 
 void DrawTextAt(float x, float y, const char* text, float scale, const CRGBA& color, uint8_t style = 1, uint8_t orientation = 1)
 {
-    if (!CFont_PrintString || !CFont_RenderFontBuffer) return;
+    if (!CFont_PrintString || !CFont_RenderFontBuffer || !text || text[0] == '\0') return;
 
-    unsigned short gxtBuf[160];
-    ConvertAsciiToGxt(text, gxtBuf, 160);
+    unsigned short gxtBuf[256];
+    memset(gxtBuf, 0, sizeof(gxtBuf));
+    ConvertAsciiToGxt(text, gxtBuf, 256);
 
     CRGBA dropColor(0, 0, 0, 255);
 
@@ -309,8 +318,8 @@ void DrawNativeFloatingMenu()
             "[+] TAMBAH $1.000.000",
             "[=] SET $2.000.000 (DEFAULT)",
             "[=] SET $999.999.999 (MAX)",
-            bDynamicInfiniteMoney ? "[~] DYNAMIC INFINITE: [AKTIF]" : "[~] DYNAMIC INFINITE: [NONAKTIF]",
-            bForceExactMoney      ? "[~] FORCE EXACT: [AKTIF]"      : "[~] FORCE EXACT: [NONAKTIF]",
+            bDynamicInfiniteMoney ? "[*] DYNAMIC INFINITE: [AKTIF]" : "[*] DYNAMIC INFINITE: [NONAKTIF]",
+            bForceExactMoney      ? "[*] FORCE EXACT: [AKTIF]"      : "[*] FORCE EXACT: [NONAKTIF]",
             "[-] RESET NORMAL ($350)",
             "[0] KURAS UANG ($0 / BROKE)",
             "[S] SIMPAN CONFIG (.INI)",
@@ -337,7 +346,7 @@ void DrawNativeFloatingMenu()
         }
 
         // Pesan Notifikasi Feedback di Bagian Bawah
-        if (g_FeedbackTimer > 0)
+        if (g_FeedbackTimer > 0 && g_FeedbackMsg[0] != '\0')
         {
             --g_FeedbackTimer;
             DrawTextAt(menuX + (20.0f * scaleRatio), menuY + menuH - (25.0f * scaleRatio), g_FeedbackMsg, 0.85f * scaleRatio, CRGBA(60, 255, 100, 255));
