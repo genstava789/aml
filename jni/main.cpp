@@ -74,6 +74,9 @@ void (*AND_TouchEvent)(int actionType, int trackNum, int x, int y) = nullptr;
 typedef void* (*FindPlayerPed_fn)(int);
 FindPlayerPed_fn FindPlayerPed = nullptr;
 
+typedef void* (*FindPlayerVehicle_fn)(int, bool);
+FindPlayerVehicle_fn FindPlayerVehicle_Call = nullptr;
+
 typedef void (*CCheat_MoneyArmourHealthCheat_fn)();
 CCheat_MoneyArmourHealthCheat_fn CCheat_MoneyArmourHealthCheat = nullptr;
 
@@ -128,9 +131,8 @@ typedef bool (*CWeapon_Fire_fn)(uintptr_t thisWeapon, uintptr_t pFiringEntity, C
 CWeapon_Fire_fn CWeapon_Fire = nullptr;
 CWeapon_Fire_fn Orig_CWeapon_Fire = nullptr;
 
-typedef bool (*CPlayerPed_FindWeaponLockOnTarget_fn)(uintptr_t playerPed);
-CPlayerPed_FindWeaponLockOnTarget_fn CPlayerPed_FindWeaponLockOnTarget = nullptr;
-CPlayerPed_FindWeaponLockOnTarget_fn Orig_CPlayerPed_FindWeaponLockOnTarget = nullptr;
+typedef bool (*CalcScreenCoors_fn)(const CVector& In, CVector* pResult);
+CalcScreenCoors_fn CalcScreenCoors_Call = nullptr;
 
 typedef void (*CPed_SetWeaponLockOnTarget_fn)(uintptr_t thisPed, uintptr_t targetEntity);
 CPed_SetWeaponLockOnTarget_fn CPed_SetWeaponLockOnTarget = nullptr;
@@ -568,7 +570,7 @@ void QueueGodModeCheat()
 }
 
 // -------------------------------------------------------------
-// Aim Assist Headshot (Otomatis & Instan Alihkan Torso ke Kepala NPC)
+// Aim Assist Headshot & Hip-Fire Crosshair Indicator
 // Berdasarkan analisa mendalam IDA Pro:
 // 1. Hook CPed::GetBonePosition:
 //    - Alihkan setiap query torso (bone 1-5) menjadi BONE_HEAD (8) untuk NPC musuh hidup.
@@ -577,12 +579,15 @@ void QueueGodModeCheat()
 //      berdasarkan sudut S1 yang diskalakan jarak, sehingga membidik dari kejauhan secara otomatis
 //      turun ke torso/dada. Dengan meng-NOP instruksi ini menjadi 0xD503201F, sudut pitch kamera
 //      100% konsisten mengarah tepat ke kepala musuh di jarak dekat, menengah, maupun jauh!
-// 3. Hook CPlayerPed::FindWeaponLockOnTarget:
-//    - Game bawaan hanya mencari target jarak pendek (25-35m). Jika musuh jauh, game otomatis
-//      gagal lock-on dan melakukan free-aim ke udara kosong saat menembak tanpa membidik (hip-fire).
-//    - Hook ini mencari musuh hidup di hadapan player (hingga 75 meter) dan menguncinya, sehingga
-//      CJ otomatis menoleh dan menembak tepat ke kepala musuh tersebut.
-// 4. Hook CPedIK::PointGunAtPosition & CWeapon::Fire:
+// 3. Hip-Fire Native Task (Bawaan Game 100% Anti-Bug / Anti-Twitch):
+//    - Logika penargetan hip-fire dan progresi animasi tembakan dikembalikan seutuhnya ke bawaan
+//      game GTA SA (tanpa memaksa fake lock-on luar jarak), sehingga CJ menembak dengan lancar
+//      tanpa ngebug, macet, atau ragu-ragu menggerakkan senjata.
+// 4. Hip-Fire Aim Indicator & Headshot Reticle:
+//    - Saat player menembak hip-fire tanpa membidik, modul merender indikator aim / crosshair
+//      dinamis dengan animasi hentakan recoil. Jika ada NPC yang sedang ditargetkan, modul
+//      menampilkan braket tactical lock-on neon dan titik merah tepat di kepala NPC tersebut!
+// 5. Hook CPedIK::PointGunAtPosition & CWeapon::Fire:
 //    - Mengarahkan angkat senjata dan trajektori peluru 100% akurat ke BONE_HEAD target.
 // -------------------------------------------------------------
 void ApplyAimAssistPatches(bool enable)
@@ -744,51 +749,6 @@ uintptr_t FindBestTargetInFrontOfPlayer(uintptr_t playerPed, float maxDistance =
     return bestPed;
 }
 
-bool Hooked_CPlayerPed_FindWeaponLockOnTarget(uintptr_t playerPed)
-{
-    bool found = false;
-    if (Orig_CPlayerPed_FindWeaponLockOnTarget)
-    {
-        found = Orig_CPlayerPed_FindWeaponLockOnTarget(playerPed);
-    }
-
-    if (bAimAssistHead && playerPed)
-    {
-        // 1. Cek jika target yang saat ini dikunci sudah mati
-        uintptr_t curTarget = GetPlayerTargetedPed(playerPed);
-        if (curTarget && !IsPedAliveSafe(curTarget))
-        {
-            if (CPed_SetWeaponLockOnTarget) CPed_SetWeaponLockOnTarget(playerPed, 0);
-            found = false;
-        }
-
-        // 2. Jika game gagal mengunci target (misal NPC jauh atau di luar cone pendek bawaan):
-        // Otomatis cari target hidup di hadapan player (hingga 75 meter)
-        if (!found)
-        {
-            uintptr_t bestPed = FindBestTargetInFrontOfPlayer(playerPed, 75.0f);
-            if (bestPed && IsPedAliveSafe(bestPed))
-            {
-                #if !defined(AML32) && !defined(__arm__) && defined(__LP64__)
-                uintptr_t pPlayerData = *(uintptr_t*)(playerPed + 0x540);
-                if (pPlayerData)
-                {
-                    *(uint8_t*)(pPlayerData + 0xA1) = 1;
-                }
-                #endif
-
-                if (CPed_SetWeaponLockOnTarget)
-                {
-                    CPed_SetWeaponLockOnTarget(playerPed, bestPed);
-                }
-                return true;
-            }
-        }
-    }
-
-    return found;
-}
-
 void Hooked_CPed_GetBonePosition(uintptr_t pPed, CVector& outPosn, unsigned int boneTag, bool bCalledFromCamera)
 {
     if (bAimAssistHead && pPed != 0)
@@ -834,11 +794,6 @@ void Hooked_CPedIK_PointGunAtPosition(uintptr_t thisIK, const CVector& pos, floa
                 if (thisIK == playerIK)
                 {
                     uintptr_t targetPed = GetPlayerTargetedPed(playerPed);
-                    if (!targetPed || !IsPedAliveSafe(targetPed))
-                    {
-                        targetPed = FindBestTargetInFrontOfPlayer(playerPed, 75.0f);
-                    }
-
                     if (targetPed && IsPedAliveSafe(targetPed))
                     {
                         CPed_GetBonePosition_fn getBone = Orig_CPed_GetBonePosition ? Orig_CPed_GetBonePosition : CPed_GetBonePosition;
@@ -867,6 +822,9 @@ void Hooked_CPedIK_PointGunAtPosition(uintptr_t thisIK, const CVector& pos, floa
     }
 }
 
+// Timer frame untuk menampilkan crosshair hip-fire
+int g_HipFireDisplayTimer = 0;
+
 bool Hooked_CWeapon_Fire(uintptr_t thisWeapon, uintptr_t pFiringEntity, CVector* pSource, CVector* pTarget, uintptr_t pTargetEntity, CVector* a6, CVector* a7)
 {
     if (bAimAssistHead && pFiringEntity)
@@ -876,14 +834,13 @@ bool Hooked_CWeapon_Fire(uintptr_t thisWeapon, uintptr_t pFiringEntity, CVector*
 
         if (pFiringEntity == playerPed)
         {
+            // Catat tembakan untuk menampilkan indikator aim hip-fire
+            g_HipFireDisplayTimer = 22;
+
             uintptr_t target = pTargetEntity;
             if (!target || !IsPedAliveSafe(target))
             {
                 target = GetPlayerTargetedPed(playerPed);
-            }
-            if (!target || !IsPedAliveSafe(target))
-            {
-                target = FindBestTargetInFrontOfPlayer(playerPed, 75.0f);
             }
 
             if (target && IsPedAliveSafe(target))
@@ -911,6 +868,260 @@ bool Hooked_CWeapon_Fire(uintptr_t thisWeapon, uintptr_t pFiringEntity, CVector*
         return Orig_CWeapon_Fire(thisWeapon, pFiringEntity, pSource, pTarget, pTargetEntity, a6, a7);
     }
     return false;
+}
+
+// -------------------------------------------------------------
+// Hip-Fire Aim Indicator & Crosshair Render Logic
+// -------------------------------------------------------------
+inline bool IsPlayerUsingFirearm(uintptr_t playerPed, int* outWeaponType = nullptr)
+{
+    if (!playerPed) return false;
+
+    #if !defined(AML32) && !defined(__arm__) && defined(__LP64__)
+    int8_t activeSlot = *(int8_t*)(playerPed + 0x8DC);
+    if (activeSlot < 0 || activeSlot > 12) return false;
+
+    uintptr_t pWeapon = playerPed + 0x730 + (activeSlot * 32);
+    int weaponType = *(int*)(pWeapon + 0);
+    #else
+    int8_t activeSlot = *(int8_t*)(playerPed + 0x718);
+    if (activeSlot < 0 || activeSlot > 12) return false;
+    uintptr_t pWeapon = playerPed + 0x5A0 + (activeSlot * 28);
+    int weaponType = *(int*)(pWeapon + 0);
+    #endif
+
+    if (outWeaponType) *outWeaponType = weaponType;
+    return (weaponType >= 22 && weaponType <= 38);
+}
+
+inline bool IsPlayerWeaponFiring(uintptr_t playerPed)
+{
+    if (!playerPed) return false;
+    #if !defined(AML32) && !defined(__arm__) && defined(__LP64__)
+    int8_t activeSlot = *(int8_t*)(playerPed + 0x8DC);
+    if (activeSlot < 0 || activeSlot > 12) return false;
+    uintptr_t pWeapon = playerPed + 0x730 + (activeSlot * 32);
+    uint32_t state = *(uint32_t*)(pWeapon + 4);
+    return (state == 1); // WEAPONSTATE_FIRING
+    #else
+    return false;
+    #endif
+}
+
+inline bool IsPlayerInNativeAimMode()
+{
+    if (!pTheCamera) return false;
+    #if !defined(AML32) && !defined(__arm__) && defined(__LP64__)
+    uint8_t activeCam = *(uint8_t*)(pTheCamera + 0x5F);
+    uintptr_t camPtr = pTheCamera + (activeCam * 0x228);
+    uint16_t mode = *(uint16_t*)(camPtr + 0x186);
+    return (mode == 53 || mode == 55 || mode == 65); // MODE_AIMWEAPON, MODE_SNIPER, MODE_ROCKETLAUNCHER
+    #else
+    return false;
+    #endif
+}
+
+void DrawHipFireCrosshair(float cx, float cy, bool isLockedOn, float scaleRatio, int timer)
+{
+    if (!CSprite2d_DrawRect) return;
+
+    // Hitung efek recoil dinamik saat menembak
+    float recoil = (timer > 15) ? (float)(timer - 15) * 1.5f * scaleRatio : 0.0f;
+    float gap = (10.0f + recoil) * scaleRatio;
+    float len = 9.0f * scaleRatio;
+    float th  = 2.2f * scaleRatio;
+    float sh  = 1.0f * scaleRatio;
+
+    uint8_t alpha = 240;
+    if (timer <= 6)
+    {
+        alpha = (uint8_t)(timer * 40); // Smooth fade-out di akhir tembakan
+    }
+
+    CRGBA colShadow(0, 0, 0, (uint8_t)(alpha * 0.70f));
+    CRGBA colCenter = isLockedOn ? CRGBA(255, 60, 60, alpha) : CRGBA(255, 255, 255, alpha);
+    CRGBA colTicks  = isLockedOn ? CRGBA(40, 255, 120, alpha) : CRGBA(255, 255, 255, alpha);
+
+    // 1. Center Dot
+    float dotSize = (isLockedOn ? 2.8f : 2.0f) * scaleRatio;
+    DrawFilledBox(cx - dotSize - sh, cy - dotSize - sh, cx + dotSize + sh, cy + dotSize + sh, colShadow);
+    DrawFilledBox(cx - dotSize, cy - dotSize, cx + dotSize, cy + dotSize, colCenter);
+
+    // 2. Crosshair Ticks (Atas, Bawah, Kiri, Kanan)
+    // Atas
+    DrawFilledBox(cx - (th * 0.5f) - sh, cy - gap - len - sh, cx + (th * 0.5f) + sh, cy - gap + sh, colShadow);
+    DrawFilledBox(cx - (th * 0.5f), cy - gap - len, cx + (th * 0.5f), cy - gap, colTicks);
+
+    // Bawah
+    DrawFilledBox(cx - (th * 0.5f) - sh, cy + gap - sh, cx + (th * 0.5f) + sh, cy + gap + len + sh, colShadow);
+    DrawFilledBox(cx - (th * 0.5f), cy + gap, cx + (th * 0.5f), cy + gap + len, colTicks);
+
+    // Kiri
+    DrawFilledBox(cx - gap - len - sh, cy - (th * 0.5f) - sh, cx - gap + sh, cy + (th * 0.5f) + sh, colShadow);
+    DrawFilledBox(cx - gap - len, cy - (th * 0.5f), cx - gap, cy + (th * 0.5f), colTicks);
+
+    // Kanan
+    DrawFilledBox(cx + gap - sh, cy - (th * 0.5f) - sh, cx + gap + len + sh, cy + (th * 0.5f) + sh, colShadow);
+    DrawFilledBox(cx + gap, cy - (th * 0.5f), cx + gap + len, cy + (th * 0.5f), colTicks);
+
+    // 3. Tactical Headshot Reticle Brackets jika sedang mengunci kepala musuh
+    if (isLockedOn)
+    {
+        float brkDist = 20.0f * scaleRatio;
+        float brkLen  = 7.0f * scaleRatio;
+        float brkTh   = 2.0f * scaleRatio;
+        CRGBA colBracket(50, 255, 120, alpha);
+
+        // Top-Left corner bracket '['
+        DrawFilledBox(cx - brkDist - sh, cy - brkDist - sh, cx - brkDist + brkLen + sh, cy - brkDist + brkTh + sh, colShadow);
+        DrawFilledBox(cx - brkDist, cy - brkDist, cx - brkDist + brkLen, cy - brkDist + brkTh, colBracket);
+        DrawFilledBox(cx - brkDist - sh, cy - brkDist - sh, cx - brkDist + brkTh + sh, cy - brkDist + brkLen + sh, colShadow);
+        DrawFilledBox(cx - brkDist, cy - brkDist, cx - brkDist + brkTh, cy - brkDist + brkLen, colBracket);
+
+        // Top-Right corner bracket ']'
+        DrawFilledBox(cx + brkDist - brkLen - sh, cy - brkDist - sh, cx + brkDist + sh, cy - brkDist + brkTh + sh, colShadow);
+        DrawFilledBox(cx + brkDist - brkLen, cy - brkDist, cx + brkDist, cy - brkDist + brkTh, colBracket);
+        DrawFilledBox(cx + brkDist - brkTh - sh, cy - brkDist - sh, cx + brkDist + sh, cy - brkDist + brkLen + sh, colShadow);
+        DrawFilledBox(cx + brkDist - brkTh, cy - brkDist, cx + brkDist, cy - brkDist + brkLen, colBracket);
+
+        // Bottom-Left corner bracket
+        DrawFilledBox(cx - brkDist - sh, cy + brkDist - brkTh - sh, cx - brkDist + brkLen + sh, cy + brkDist + sh, colShadow);
+        DrawFilledBox(cx - brkDist, cy + brkDist - brkTh, cx - brkDist + brkLen, cy + brkDist, colBracket);
+        DrawFilledBox(cx - brkDist - sh, cy + brkDist - brkLen - sh, cx - brkDist + brkTh + sh, cy + brkDist + sh, colShadow);
+        DrawFilledBox(cx - brkDist, cy + brkDist - brkLen, cx - brkDist + brkTh, cy + brkDist, colBracket);
+
+        // Bottom-Right corner bracket
+        DrawFilledBox(cx + brkDist - brkLen - sh, cy + brkDist - brkTh - sh, cx + brkDist + sh, cy + brkDist + sh, colShadow);
+        DrawFilledBox(cx + brkDist - brkLen, cy + brkDist - brkTh, cx + brkDist, cy + brkDist, colBracket);
+        DrawFilledBox(cx + brkDist - brkTh - sh, cy + brkDist - brkLen - sh, cx + brkDist + sh, cy + brkDist + sh, colShadow);
+        DrawFilledBox(cx + brkDist - brkTh, cy + brkDist - brkLen, cx + brkDist, cy + brkDist, colBracket);
+    }
+}
+
+void ProcessAndDrawHipFireCrosshair()
+{
+    if (!bAimAssistHead || !IsPlayerInGame()) return;
+
+    if (pRsGlobal && pRsGlobal->maximumWidth > 0 && pRsGlobal->maximumHeight > 0)
+    {
+        g_ScreenWidth = (float)pRsGlobal->maximumWidth;
+        g_ScreenHeight = (float)pRsGlobal->maximumHeight;
+    }
+
+    uintptr_t localPlayer = GetLocalPlayerPtr();
+    if (!localPlayer) return;
+    uintptr_t playerPed = *(uintptr_t*)(localPlayer + OFFSET_PED);
+    if (!playerPed || !IsPedAliveSafe(playerPed)) return;
+
+    // Pastikan player tidak sedang di dalam kendaraan
+    if (FindPlayerVehicle_Call && FindPlayerVehicle_Call(-1, false)) return;
+
+    // Cek jika player sedang memegang senjata api
+    int weaponType = 0;
+    if (!IsPlayerUsingFirearm(playerPed, &weaponType))
+    {
+        g_HipFireDisplayTimer = 0;
+        return;
+    }
+
+    // Perpanjang timer selama senjata sedang aktif menembak
+    if (IsPlayerWeaponFiring(playerPed))
+    {
+        g_HipFireDisplayTimer = 22;
+    }
+
+    if (g_HipFireDisplayTimer <= 0) return;
+    g_HipFireDisplayTimer--;
+
+    // Jika sedang dalam mode manual aim bawaan game (kamera mode 53/55/65),
+    // crosshair bawaan game sudah menggambar dirinya sendiri
+    if (IsPlayerInNativeAimMode()) return;
+
+    float scaleRatio = g_ScreenHeight / 1080.0f;
+    if (scaleRatio < 0.65f) scaleRatio = 0.65f;
+    if (scaleRatio > 1.35f) scaleRatio = 1.35f;
+
+    CVector screenPos(0.0f, 0.0f, 0.0f);
+    bool hasScreenPos = false;
+    bool isLockedOn = false;
+
+    // 1. Cek jika player sedang mengunci/menargetkan NPC (bawaan game atau tap aim)
+    uintptr_t targetPed = GetPlayerTargetedPed(playerPed);
+    if (targetPed && IsPedAliveSafe(targetPed))
+    {
+        CPed_GetBonePosition_fn getBone = Orig_CPed_GetBonePosition ? Orig_CPed_GetBonePosition : CPed_GetBonePosition;
+        CVector headPos(0.0f, 0.0f, 0.0f);
+        if (getBone) getBone(targetPed, headPos, 8, false); // BONE_HEAD
+        if (headPos.x == 0.0f && headPos.y == 0.0f && headPos.z == 0.0f)
+        {
+            uintptr_t pedMat = *(uintptr_t*)(targetPed + 0x18);
+            if (pedMat) headPos = *(CVector*)(pedMat + 0x30);
+            else headPos = *(CVector*)(targetPed + 8);
+            headPos.z += 0.8f;
+        }
+
+        if (CalcScreenCoors_Call)
+        {
+            CVector scr;
+            if (CalcScreenCoors_Call(headPos, &scr))
+            {
+                if (scr.x >= 20.0f && scr.x <= (g_ScreenWidth - 20.0f) &&
+                    scr.y >= 20.0f && scr.y <= (g_ScreenHeight - 20.0f))
+                {
+                    screenPos = scr;
+                    hasScreenPos = true;
+                    isLockedOn = true;
+                }
+            }
+        }
+    }
+
+    // 2. Jika tidak ada target lock-on (hip fire bebas ke arah hadap player)
+    if (!hasScreenPos)
+    {
+        uintptr_t pMatrix = *(uintptr_t*)(playerPed + 0x18);
+        CVector muzzleAim;
+        if (pMatrix)
+        {
+            CVector pPos = *(CVector*)(pMatrix + 0x30);
+            float fwdX = *(float*)(pMatrix + 0x10);
+            float fwdY = *(float*)(pMatrix + 0x14);
+            float fwdZ = *(float*)(pMatrix + 0x18);
+            muzzleAim.x = pPos.x + fwdX * 25.0f;
+            muzzleAim.y = pPos.y + fwdY * 25.0f;
+            muzzleAim.z = pPos.z + 0.6f + fwdZ * 25.0f;
+        }
+        else
+        {
+            CVector pPos = *(CVector*)(playerPed + 8);
+            muzzleAim.x = pPos.x;
+            muzzleAim.y = pPos.y + 25.0f;
+            muzzleAim.z = pPos.z + 0.6f;
+        }
+
+        if (CalcScreenCoors_Call)
+        {
+            CVector scr;
+            if (CalcScreenCoors_Call(muzzleAim, &scr))
+            {
+                if (scr.x >= 20.0f && scr.x <= (g_ScreenWidth - 20.0f) &&
+                    scr.y >= 20.0f && scr.y <= (g_ScreenHeight - 20.0f))
+                {
+                    screenPos = scr;
+                    hasScreenPos = true;
+                }
+            }
+        }
+    }
+
+    // 3. Fallback jika di luar proyeksi layar / di belakang kamera
+    if (!hasScreenPos)
+    {
+        screenPos.x = g_ScreenWidth * 0.50f;
+        screenPos.y = g_ScreenHeight * 0.42f;
+    }
+
+    DrawHipFireCrosshair(screenPos.x, screenPos.y, isLockedOn, scaleRatio, g_HipFireDisplayTimer);
 }
 
 // -------------------------------------------------------------
@@ -1803,6 +2014,7 @@ void Hooked_CHud_DrawAfterFade()
     if (CHud_DrawAfterFade) CHud_DrawAfterFade();
     if (IsPlayerInGame())
     {
+        ProcessAndDrawHipFireCrosshair();
         DrawNativeFloatingMenu();
     }
 }
@@ -2145,6 +2357,7 @@ extern "C" void OnModLoad()
     pPlayersArray  = aml->GetSym(pGTASA, "_ZN6CWorld7PlayersE");
     pPlayerInFocus = (uint8_t*)aml->GetSym(pGTASA, "_ZN6CWorld13PlayerInFocusE");
     FindPlayerPed  = (FindPlayerPed_fn)aml->GetSym(pGTASA, "_Z13FindPlayerPedi");
+    FindPlayerVehicle_Call = (FindPlayerVehicle_fn)aml->GetSym(pGTASA, "_Z17FindPlayerVehicleib");
     pRsGlobal      = (RsGlobalType*)aml->GetSym(pGTASA, "RsGlobal");
 
     // Resolusi cheat resmi CCheat::MoneyArmourHealthCheat (offset IDA: 0x3C1B64)
@@ -2282,17 +2495,17 @@ extern "C" void OnModLoad()
         #endif
     }
 
-    uintptr_t pFindLockOn = aml->GetSym(pGTASA, "_ZN10CPlayerPed22FindWeaponLockOnTargetEv");
-    if (!pFindLockOn)
+    uintptr_t pCalcScreen = aml->GetSym(pGTASA, "_Z15CalcScreenCoorsRK7CVectorPS_");
+    if (!pCalcScreen)
     {
         #if !defined(AML32) && !defined(__arm__) && defined(__LP64__)
-            pFindLockOn = pGTASA + 0x5C494C; // IDA Pro offset ARM64
+            pCalcScreen = pGTASA + 0x6D2E70; // IDA Pro offset ARM64
         #endif
     }
-    if (pFindLockOn)
+    if (pCalcScreen)
     {
-        aml->Hook((void*)pFindLockOn, (void*)Hooked_CPlayerPed_FindWeaponLockOnTarget, (void**)&Orig_CPlayerPed_FindWeaponLockOnTarget);
-        logger->Info("Hook CPlayerPed::FindWeaponLockOnTarget (_ZN10CPlayerPed22FindWeaponLockOnTargetEv) berhasil! Hip-fire headshot jarak jauh aktif.");
+        CalcScreenCoors_Call = (CalcScreenCoors_fn)pCalcScreen;
+        logger->Info("Symbol CalcScreenCoors (_Z15CalcScreenCoorsRK7CVectorPS_) berhasil ditemukan di: %p", (void*)pCalcScreen);
     }
 
     uintptr_t pSetLockOn = aml->GetSym(pGTASA, "_ZN4CPed21SetWeaponLockOnTargetEP7CEntity");
