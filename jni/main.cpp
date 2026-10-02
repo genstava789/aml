@@ -1,45 +1,118 @@
 #include <mod/amlmod.h>
 #include <mod/logger.h>
+#include <mod/config.h>
 
-MYMOD(com.example.infinitemoney, Infinite Money Mod, 1.0, YourName)
+MYMOD(com.example.infinitemoney, Infinite Money Mod, 1.1, YourName)
 NEEDGAME(com.rockstargames.gtasa)
 
 uintptr_t pGTASA = 0;
-void (*CGame_Process)();
 
+// Function pointers
+void (*CGame_Process)();
+void (*CGame_InitialiseWhenRestarting)();
+typedef void* (*FindPlayerPed_fn)(int);
+FindPlayerPed_fn FindPlayerPed = nullptr;
+
+// Game symbols
 uintptr_t pPlayersArray = 0;
 uint8_t* pPlayerInFocus = nullptr;
 
-// Flag agar modifikasi memori hanya dieksekusi 1 kali saat masuk gameplay
-bool bMoneyApplied = false;
+// Konfigurasi & Target Uang
+int32_t targetMoney = 2000000;       // Default: $2.000.000
+bool bDynamicInfiniteMoney = true;  // Pertahankan uang minimal sebesar targetMoney
+bool bForceExactMoney = false;      // Selalu paksa uang tepat sebesar targetMoney
 
-// Nominal uang yang diinginkan (contoh: 2 Juta Dollar)
-const int32_t TARGET_MONEY = 2000000;
+// Status sesi agar log tidak spam setiap frame
+bool bHasLoggedThisSession = false;
+
+// Offset memori CPlayerInfo disesuaikan per arsitektur (32-bit vs 64-bit)
+#if defined(AML32) || defined(__arm__) || !defined(__LP64__)
+    // 32-bit (armeabi-v7a): sizeof(CPlayerInfo) = 0x194
+    static constexpr size_t PLAYER_INFO_SIZE     = 0x194;
+    static constexpr size_t OFFSET_PED           = 0x0;
+    static constexpr size_t OFFSET_MONEY         = 0xB8;
+    static constexpr size_t OFFSET_DISPLAY_MONEY = 0xBC;
+#else
+    // 64-bit (arm64-v8a): sizeof(CPlayerInfo) = 0x1D8
+    static constexpr size_t PLAYER_INFO_SIZE     = 0x1D8;
+    static constexpr size_t OFFSET_PED           = 0x0;
+    static constexpr size_t OFFSET_MONEY         = 0xF0;
+    static constexpr size_t OFFSET_DISPLAY_MONEY = 0xF4;
+#endif
+
+void ApplyMoneyToPlayer(uintptr_t localPlayer)
+{
+    int32_t* pMoney = (int32_t*)(localPlayer + OFFSET_MONEY);
+    int32_t* pDisplayMoney = (int32_t*)(localPlayer + OFFSET_DISPLAY_MONEY);
+
+    if (bForceExactMoney)
+    {
+        if (*pMoney != targetMoney)
+        {
+            *pMoney = targetMoney;
+            *pDisplayMoney = targetMoney;
+            if (!bHasLoggedThisSession)
+            {
+                logger->Info("Uang diset ke nominal tetap: %d", targetMoney);
+                bHasLoggedThisSession = true;
+            }
+        }
+    }
+    else if (bDynamicInfiniteMoney)
+    {
+        // Jika uang kurang dari target (misal saat New Game reset ke $350, atau setelah belanja)
+        if (*pMoney < targetMoney)
+        {
+            *pMoney = targetMoney;
+            *pDisplayMoney = targetMoney; // Hindari animasi rolling lambat pada HUD
+            if (!bHasLoggedThisSession)
+            {
+                logger->Info("Uang player berhasil diperbarui dinamis ke: %d", targetMoney);
+                bHasLoggedThisSession = true;
+            }
+        }
+    }
+}
 
 void Hooked_CGame_Process()
 {
-    // Jalankan loop asli game
+    // Jalankan loop asli game terlebih dahulu
     CGame_Process();
 
-    // Jalankan hanya jika belum pernah di-set dan data player sudah siap
-    if (!bMoneyApplied && pPlayersArray)
+    if (!pPlayersArray) return;
+
+    int playerIndex = (pPlayerInFocus != nullptr) ? *pPlayerInFocus : 0;
+    if (playerIndex < 0 || playerIndex > 1) playerIndex = 0;
+
+    uintptr_t localPlayer = pPlayersArray + (playerIndex * PLAYER_INFO_SIZE);
+    if (!localPlayer) return;
+
+    // Ambil pointer CPlayerPed di offset 0
+    uintptr_t playerPed = *(uintptr_t*)(localPlayer + OFFSET_PED);
+
+    // Verifikasi tambahan dengan FindPlayerPed jika tersedia di symbol table
+    if (FindPlayerPed != nullptr && FindPlayerPed(-1) == nullptr)
     {
-        int playerIndex = (pPlayerInFocus != nullptr) ? *pPlayerInFocus : 0;
-        uintptr_t localPlayer = pPlayersArray + (playerIndex * 0x1D8);
-
-        // Pastikan memori game sudah diinisialisasi (bukan nullptr / 0)
-        if (localPlayer != 0)
-        {
-            // 1. Tulis uang asli (Actual Money) di offset 0xF0
-            *(int32_t*)(localPlayer + 0xF0) = TARGET_MONEY;
-
-            // 2. Tulis uang tampilan HUD di offset 0xF4 agar tidak ada animasi rolling bertahap
-            *(int32_t*)(localPlayer + 0xF4) = TARGET_MONEY;
-
-            bMoneyApplied = true; // Tandai sudah selesai, jangan di-loop lagi
-            logger->Info("Uang berhasil diset instan ke: %d", TARGET_MONEY);
-        }
+        playerPed = 0;
     }
+
+    // Hanya terapkan jika player ped sudah aktif di gameplay (bukan saat di menu / loading)
+    if (playerPed != 0)
+    {
+        ApplyMoneyToPlayer(localPlayer);
+    }
+    else
+    {
+        // Player belum spawn (masih di menu atau loading) -> reset status logging untuk sesi berikutnya
+        bHasLoggedThisSession = false;
+    }
+}
+
+void Hooked_CGame_InitialiseWhenRestarting()
+{
+    logger->Info("CGame::InitialiseWhenRestarting terpanggil (New Game / Load Game terdeteksi).");
+    bHasLoggedThisSession = false;
+    CGame_InitialiseWhenRestarting();
 }
 
 extern "C" void OnModLoad()
@@ -53,11 +126,40 @@ extern "C" void OnModLoad()
         return;
     }
 
+    // Inisialisasi konfigurasi (.ini) secara aman jika interface AMLConfig tersedia
+    if (GetInterface("AMLConfig") != nullptr)
+    {
+        Config* cfg = new Config("GTA_InfiniteMoney");
+        ConfigEntry* entryTarget = cfg->Bind("TargetMoney", targetMoney, "MoneyCheat");
+        ConfigEntry* entryInfinite = cfg->Bind("DynamicInfiniteMoney", bDynamicInfiniteMoney, "MoneyCheat");
+        ConfigEntry* entryForce = cfg->Bind("ForceExactMoney", bForceExactMoney, "MoneyCheat");
+
+        if (entryTarget) targetMoney = entryTarget->GetInt();
+        if (entryInfinite) bDynamicInfiniteMoney = entryInfinite->GetBool();
+        if (entryForce) bForceExactMoney = entryForce->GetBool();
+
+        cfg->Save();
+        logger->Info("Konfigurasi dimuat: TargetMoney=%d, Dynamic=%d, Force=%d", targetMoney, bDynamicInfiniteMoney, bForceExactMoney);
+    }
+    else
+    {
+        logger->Info("AMLConfig tidak tersedia, memakai konfigurasi default: TargetMoney=%d", targetMoney);
+    }
+
     // Ambil symbol array CWorld::Players dan PlayerInFocus
     pPlayersArray = aml->GetSym(pGTASA, "_ZN6CWorld7PlayersE");
     pPlayerInFocus = (uint8_t*)aml->GetSym(pGTASA, "_ZN6CWorld13PlayerInFocusE");
 
-    // Hook game process
+    // Ambil symbol FindPlayerPed jika tersedia
+    FindPlayerPed = (FindPlayerPed_fn)aml->GetSym(pGTASA, "_Z13FindPlayerPedi");
+
+    if (!pPlayersArray)
+    {
+        logger->Error("Gagal menemukan symbol CWorld::Players");
+        return;
+    }
+
+    // Hook CGame::Process
     uintptr_t pProcess = aml->GetSym(pGTASA, "_ZN5CGame7ProcessEv");
     if (pProcess)
     {
@@ -67,5 +169,13 @@ extern "C" void OnModLoad()
     else
     {
         logger->Error("Gagal menemukan CGame::Process");
+    }
+
+    // Hook CGame::InitialiseWhenRestarting untuk mendeteksi New Game / Load Game secara instan
+    uintptr_t pRestart = aml->GetSym(pGTASA, "_ZN5CGame24InitialiseWhenRestartingEv");
+    if (pRestart)
+    {
+        aml->Hook((void*)pRestart, (void*)Hooked_CGame_InitialiseWhenRestarting, (void**)&CGame_InitialiseWhenRestarting);
+        logger->Info("Hook CGame::InitialiseWhenRestarting berhasil!");
     }
 }

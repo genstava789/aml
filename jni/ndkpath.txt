@@ -1,1 +1,1 @@
-D:\android-ndk
+C:\Android\android-sdk\ndk\27.3.13750724

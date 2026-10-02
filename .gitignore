@@ -1,0 +1,18 @@
+# Build intermediates & object files
+obj/
+**/obj/
+*.o
+*.d
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
