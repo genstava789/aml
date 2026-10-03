@@ -119,6 +119,9 @@ CCheat_TogglePlayerInvincibility_fn CCheat_TogglePlayerInvincibility = nullptr;
 CCheat_WantedCheat_fn CCheat_WantedCheat = nullptr;
 CCheat_NotWantedCheat_fn CCheat_NotWantedCheat = nullptr;
 CPlayerPed_CheatWantedLevel_fn CPlayerPed_CheatWantedLevel = nullptr;
+typedef void (*CPlayerPed_SetWantedLevel_fn)(uintptr_t thisPed, int level);
+CPlayerPed_SetWantedLevel_fn CPlayerPed_SetWantedLevel = nullptr;
+uint8_t* pCheatsActive = nullptr;
 CPed_GiveWeapon_fn CPed_GiveWeapon = nullptr;
 
 typedef void (*CStreaming_RequestModel_fn)(int modelIndex, int flags);
@@ -602,12 +605,26 @@ void ExecuteWantedCheat(int level)
 
     if (level == 6)
     {
-        if (playerPed && CPlayerPed_CheatWantedLevel)
+        // 1. Reset flag "Never Wanted" (0x49) yang memblokir naiknya bintang polisi di GTA SA!
+        if (pCheatsActive)
         {
-            CPlayerPed_CheatWantedLevel(playerPed, 6);
-            logger->Info("[Cheat] CPlayerPed::CheatWantedLevel(6) dieksekusi di Main Thread.");
+            pCheatsActive[0x49] = 0;
+            logger->Info("[Cheat] pCheatsActive[0x49] direset ke 0 (Never Wanted dimatikan).");
         }
-        else if (CCheat_WantedCheat)
+
+        // 2. Berikan 6 bintang langsung lewat SetWantedLevel dan CheatWantedLevel
+        if (playerPed)
+        {
+            if (CPlayerPed_SetWantedLevel)
+            {
+                CPlayerPed_SetWantedLevel(playerPed, 6);
+            }
+            if (CPlayerPed_CheatWantedLevel)
+            {
+                CPlayerPed_CheatWantedLevel(playerPed, 6);
+            }
+        }
+        if (CCheat_WantedCheat)
         {
             CCheat_WantedCheat();
             logger->Info("[Cheat] CCheat::WantedCheat (0x3C2B04) dieksekusi di Main Thread.");
@@ -615,10 +632,22 @@ void ExecuteWantedCheat(int level)
     }
     else if (level == 0)
     {
-        if (playerPed && CPlayerPed_CheatWantedLevel)
+        // 1. Bersihkan wanted level saat ini
+        if (playerPed)
         {
-            CPlayerPed_CheatWantedLevel(playerPed, 0);
-            logger->Info("[Cheat] CPlayerPed::CheatWantedLevel(0) dieksekusi di Main Thread.");
+            if (CPlayerPed_SetWantedLevel)
+            {
+                CPlayerPed_SetWantedLevel(playerPed, 0);
+            }
+            if (CPlayerPed_CheatWantedLevel)
+            {
+                CPlayerPed_CheatWantedLevel(playerPed, 0);
+            }
+        }
+        // 2. Kunci status Never Wanted
+        if (pCheatsActive)
+        {
+            pCheatsActive[0x49] = 1;
         }
         if (CCheat_NotWantedCheat)
         {
@@ -664,8 +693,16 @@ void ApplyInfiniteAmmo(uintptr_t playerPed)
         int type = *(int*)(w + 0);
         if (type >= 16 && type <= 43)
         {
-            *(uint32_t*)(w + 8) = 999;   // m_nAmmoInClip (no reload needed!)
-            *(uint32_t*)(w + 12) = 9999; // m_nAmmoTotal
+            uint32_t state = *(uint32_t*)(w + 4);
+            // HANYA update amunisi saat status senjata READY (0),
+            // TIDAK PERNAH menginterupsi alur state FIRING (1) atau RELOADING (2)!
+            if (state == 0)
+            {
+                uint32_t clip = *(uint32_t*)(w + 8);
+                if (clip < 100) *(uint32_t*)(w + 8) = 999;
+                uint32_t total = *(uint32_t*)(w + 12);
+                if (total < 1000) *(uint32_t*)(w + 12) = 9999;
+            }
         }
     }
 }
@@ -928,66 +965,50 @@ int g_HipFireDisplayTimer = 0;
 
 bool Hooked_CWeapon_Fire(uintptr_t thisWeapon, uintptr_t pFiringEntity, CVector* pSource, CVector* pTarget, uintptr_t pTargetEntity, CVector* a6, CVector* a7)
 {
-    if (bAimAssistHead && pFiringEntity)
+    if (pFiringEntity)
     {
         uintptr_t localPlayer = GetLocalPlayerPtr();
         uintptr_t playerPed = localPlayer ? *(uintptr_t*)(localPlayer + OFFSET_PED) : 0;
 
         if (pFiringEntity == playerPed)
         {
-            // Catat tembakan untuk menampilkan indikator aim hip-fire
+            // Catat tembakan untuk menampilkan indikator aim hip-fire secara konsisten
             g_HipFireDisplayTimer = 22;
 
-            if (bInfiniteAmmo)
+            if (bAimAssistHead)
             {
-                *(uint32_t*)(thisWeapon + 8) = 999;
-                *(uint32_t*)(thisWeapon + 12) = 9999;
-            }
-
-            uintptr_t target = pTargetEntity;
-            if (!target || !IsPedAliveSafe(target))
-            {
-                target = GetPlayerTargetedPed(playerPed);
-            }
-
-            if (target && IsPedAliveSafe(target))
-            {
-                CPed_GetBonePosition_fn getBone = Orig_CPed_GetBonePosition ? Orig_CPed_GetBonePosition : CPed_GetBonePosition;
-                if (getBone)
+                uintptr_t target = pTargetEntity;
+                if (!target || !IsPedAliveSafe(target))
                 {
-                    CVector headPos(0.0f, 0.0f, 0.0f);
-                    getBone(target, headPos, 8, false); // BONE_HEAD
-                    if (headPos.x != 0.0f || headPos.y != 0.0f || headPos.z != 0.0f)
+                    target = GetPlayerTargetedPed(playerPed);
+                }
+
+                if (target && IsPedAliveSafe(target))
+                {
+                    CPed_GetBonePosition_fn getBone = Orig_CPed_GetBonePosition ? Orig_CPed_GetBonePosition : CPed_GetBonePosition;
+                    if (getBone)
                     {
-                        if (pTarget)
+                        CVector headPos(0.0f, 0.0f, 0.0f);
+                        getBone(target, headPos, 8, false); // BONE_HEAD
+                        if (headPos.x != 0.0f || headPos.y != 0.0f || headPos.z != 0.0f)
                         {
-                            *pTarget = headPos; // Arahkan peluru langsung ke KEPALA!
+                            if (pTarget)
+                            {
+                                *pTarget = headPos; // Arahkan peluru langsung ke KEPALA!
+                            }
+                            pTargetEntity = target;
                         }
-                        pTargetEntity = target;
                     }
                 }
             }
         }
     }
 
-    bool res = false;
     if (Orig_CWeapon_Fire)
     {
-        res = Orig_CWeapon_Fire(thisWeapon, pFiringEntity, pSource, pTarget, pTargetEntity, a6, a7);
+        return Orig_CWeapon_Fire(thisWeapon, pFiringEntity, pSource, pTarget, pTargetEntity, a6, a7);
     }
-
-    if (bInfiniteAmmo && pFiringEntity)
-    {
-        uintptr_t localPlayer = GetLocalPlayerPtr();
-        uintptr_t playerPed = localPlayer ? *(uintptr_t*)(localPlayer + OFFSET_PED) : 0;
-        if (pFiringEntity == playerPed)
-        {
-            *(uint32_t*)(thisWeapon + 8) = 999;
-            *(uint32_t*)(thisWeapon + 12) = 9999;
-        }
-    }
-
-    return res;
+    return false;
 }
 
 // -------------------------------------------------------------
@@ -1120,7 +1141,7 @@ void DrawHipFireCrosshair(float cx, float cy, bool isLockedOn, float scaleRatio,
 
 void ProcessAndDrawHipFireCrosshair()
 {
-    if (!bAimAssistHead || !IsPlayerInGame()) return;
+    if (!IsPlayerInGame()) return;
 
     if (pRsGlobal && pRsGlobal->maximumWidth > 0 && pRsGlobal->maximumHeight > 0)
     {
@@ -1330,7 +1351,7 @@ void DrawNativeFloatingMenu()
         DrawFilledBox(menuX, menuY, menuX + menuW, menuY + headerH, CRGBA(25, 85, 45, 255));
         DrawTextAt(menuX + (25.0f * scaleRatio), menuY + (12.0f * scaleRatio), "--- MOD MENU (AML) ---", 1.20f * scaleRatio, CRGBA(255, 255, 255, 255));
 
-        // Subtitle Credit Modded By nexus dengan Animasi Jalan Bergerak & RGB Rainbow
+        // Subtitle Credit Modded By nexus dengan Animasi Iklan TV (Berjalan Pelan Sampai Menghilang Lalu Muncul Kembali Secara Loop)
         float subBoxLeft = menuX + (12.0f * scaleRatio);
         float subBoxRight = menuX + menuW - (12.0f * scaleRatio);
         float subBoxTop = menuY + headerH;
@@ -1338,19 +1359,40 @@ void DrawNativeFloatingMenu()
 
         DrawFilledBox(subBoxLeft, subBoxTop + (2.0f * scaleRatio), subBoxRight, subBoxBottom - (2.0f * scaleRatio), CRGBA(8, 14, 22, 220));
 
-        // Animasi jalan bergerak bolak-balik halus di dalam kotak subtitle
-        float minTextX = subBoxLeft + (15.0f * scaleRatio);
-        float maxTextX = subBoxRight - (195.0f * scaleRatio);
-        if (maxTextX < minTextX) maxTextX = minTextX;
+        // Animasi pelan TV commercial marquee: bergerak kontinu dari kanan ke kiri sampai menghilang total, lalu loop
+        uint32_t cycleDurationMs = 8000; // 8.0 detik per siklus loop (tenang & elegan)
+        float t = (float)(GetCurrentTimeMs() % cycleDurationMs) / (float)cycleDurationMs; // 0.0f -> 1.0f
 
-        float marqueeWave = sinf((float)GetCurrentTimeMs() * 0.0022f) * 0.5f + 0.5f;
-        float animatedX = minTextX + marqueeWave * (maxTextX - minTextX);
+        float textWidthEst = 195.0f * scaleRatio;
+        float startX = subBoxRight + (10.0f * scaleRatio);
+        float endX = subBoxLeft - textWidthEst - (10.0f * scaleRatio);
+        float animatedX = startX - t * (startX - endX);
 
-        CRGBA rgbCreditColor = GetRainbowColor(0.0035f, 0.0f);
-        DrawTextAt(animatedX, subBoxTop + (6.0f * scaleRatio), "★ Modded By nexus ★", 1.10f * scaleRatio, rgbCreditColor);
+        // Efek fade-in halus saat baru muncul di kanan, dan fade-out saat keluar/menghilang di kiri
+        float alphaF = 1.0f;
+        if (animatedX < subBoxLeft + (40.0f * scaleRatio))
+        {
+            float dist = animatedX - (subBoxLeft - textWidthEst);
+            alphaF = dist / (textWidthEst + (40.0f * scaleRatio));
+        }
+        else if (animatedX > subBoxRight - (50.0f * scaleRatio))
+        {
+            float dist = (subBoxRight + (10.0f * scaleRatio)) - animatedX;
+            alphaF = dist / (60.0f * scaleRatio);
+        }
+        if (alphaF < 0.0f) alphaF = 0.0f;
+        if (alphaF > 1.0f) alphaF = 1.0f;
 
-        // Pemisah garis beraksen RGB Rainbow
-        DrawFilledBox(subBoxLeft, subBoxBottom, subBoxRight, subBoxBottom + (2.0f * scaleRatio), rgbCreditColor);
+        uint8_t alpha = (uint8_t)(alphaF * 255.0f);
+        if (alpha > 5)
+        {
+            CRGBA rgbCreditColor = GetRainbowColor(0.0025f, 0.0f);
+            rgbCreditColor.a = alpha;
+            DrawTextAt(animatedX, subBoxTop + (6.0f * scaleRatio), "★ Modded By nexus ★", 1.10f * scaleRatio, rgbCreditColor);
+        }
+
+        // Pemisah garis beraksen RGB Rainbow dinamis
+        DrawFilledBox(subBoxLeft, subBoxBottom, subBoxRight, subBoxBottom + (2.0f * scaleRatio), GetRainbowColor(0.0025f, 0.0f));
 
         // Label & Gaya Dinamis Tombol Menu (10 Items)
         char ammoLabel[64];
@@ -2617,6 +2659,18 @@ extern "C" void OnModLoad()
     CCheat_WantedCheat = (CCheat_WantedCheat_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat11WantedCheatEv", OFF_WANTED);
     CCheat_NotWantedCheat = (CCheat_NotWantedCheat_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat14NotWantedCheatEv", OFF_NOTWANTED);
     CPlayerPed_CheatWantedLevel = (CPlayerPed_CheatWantedLevel_fn)ResolveCheatFunc(pGTASA, "_ZN10CPlayerPed16CheatWantedLevelEi", OFF_PLR_WANTED);
+    CPlayerPed_SetWantedLevel = (CPlayerPed_SetWantedLevel_fn)aml->GetSym(pGTASA, "_ZN10CPlayerPed14SetWantedLevelEi");
+    pCheatsActive = (uint8_t*)aml->GetSym(pGTASA, "_ZN6CCheat15m_aCheatsActiveE");
+    if (!pCheatsActive)
+    {
+        #if !defined(AML32) && !defined(__arm__) && defined(__LP64__)
+        pCheatsActive = (uint8_t*)(pGTASA + 0x9768e0);
+        #endif
+    }
+    if (pCheatsActive)
+    {
+        logger->Info("[Cheat] Symbol _ZN6CCheat15m_aCheatsActiveE berhasil ditemukan di: %p", (void*)pCheatsActive);
+    }
     CPed_GiveWeapon = (CPed_GiveWeapon_fn)ResolveCheatFunc(pGTASA, "_ZN4CPed10GiveWeaponE11eWeaponTypejb", OFF_GIVEWEAPON);
     CStreaming_RequestModel = (CStreaming_RequestModel_fn)ResolveCheatFunc(pGTASA, "_ZN10CStreaming12RequestModelEii", OFF_REQMODEL);
     CStreaming_LoadAllRequestedModels = (CStreaming_LoadAllRequestedModels_fn)ResolveCheatFunc(pGTASA, "_ZN10CStreaming22LoadAllRequestedModelsEb", OFF_LOADMODELS);
