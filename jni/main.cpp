@@ -6,6 +6,7 @@
 #include <atomic>
 #include <string.h>
 #include <math.h>
+#include <chrono>
 
 MYMOD(com.example.infinitemoney, Infinite Money Mod, 1.3, YourName)
 NEEDGAME(com.rockstargames.gtasa)
@@ -44,6 +45,21 @@ inline float GetDistance3D(const CVector& a, const CVector& b)
     float dy = a.y - b.y;
     float dz = a.z - b.z;
     return sqrtf(dx * dx + dy * dy + dz * dz);
+}
+
+inline uint32_t GetCurrentTimeMs()
+{
+    using namespace std::chrono;
+    return (uint32_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+inline CRGBA GetRainbowColor(float speed = 0.003f, float phase = 0.0f)
+{
+    float t = (float)GetCurrentTimeMs() * speed + phase;
+    float r = sinf(t) * 127.0f + 128.0f;
+    float g = sinf(t + 2.0944f) * 127.0f + 128.0f; // + 120 deg
+    float b = sinf(t + 4.1888f) * 127.0f + 128.0f; // + 240 deg
+    return CRGBA((unsigned char)r, (unsigned char)g, (unsigned char)b, 255);
 }
 
 struct CPoolGeneric
@@ -88,6 +104,9 @@ typedef void (*CCheat_WeaponCheat4_fn)();
 typedef void (*CCheat_WeaponSkillsCheat_fn)();
 typedef void (*CCheat_JetpackCheat_fn)();
 typedef void (*CCheat_TogglePlayerInvincibility_fn)();
+typedef void (*CCheat_WantedCheat_fn)();
+typedef void (*CCheat_NotWantedCheat_fn)();
+typedef void (*CPlayerPed_CheatWantedLevel_fn)(uintptr_t thisPed, int level);
 typedef void (*CPed_GiveWeapon_fn)(void* thisPed, int weaponType, unsigned int ammo, bool bSelect);
 
 CCheat_WeaponCheat1_fn CCheat_WeaponCheat1 = nullptr;
@@ -97,6 +116,9 @@ CCheat_WeaponCheat4_fn CCheat_WeaponCheat4 = nullptr;
 CCheat_WeaponSkillsCheat_fn CCheat_WeaponSkillsCheat = nullptr;
 CCheat_JetpackCheat_fn CCheat_JetpackCheat = nullptr;
 CCheat_TogglePlayerInvincibility_fn CCheat_TogglePlayerInvincibility = nullptr;
+CCheat_WantedCheat_fn CCheat_WantedCheat = nullptr;
+CCheat_NotWantedCheat_fn CCheat_NotWantedCheat = nullptr;
+CPlayerPed_CheatWantedLevel_fn CPlayerPed_CheatWantedLevel = nullptr;
 CPed_GiveWeapon_fn CPed_GiveWeapon = nullptr;
 
 typedef void (*CStreaming_RequestModel_fn)(int modelIndex, int flags);
@@ -110,8 +132,10 @@ std::atomic<int> g_QueuedWeaponCheat{0};
 std::atomic<bool> g_QueuedOfficialCheat{false};
 std::atomic<bool> g_QueuedJetpackCheat{false};
 std::atomic<bool> g_QueuedGodModeCheat{false};
+std::atomic<int> g_QueuedWantedLevel{-1};
 
 bool bGodModeActive = false;
+bool bInfiniteAmmo = false;
 
 typedef bool (*IsPedPointerValid_fn)(void* pPed);
 IsPedPointerValid_fn IsPedPointerValid = nullptr;
@@ -222,6 +246,7 @@ ConfigEntry* entryTarget = nullptr;
 ConfigEntry* entryInfinite = nullptr;
 ConfigEntry* entryForce = nullptr;
 ConfigEntry* entryAimAssist = nullptr;
+ConfigEntry* entryInfiniteAmmo = nullptr;
 
 // Offset memori CPlayerInfo & CPlayerPed disesuaikan per arsitektur (32-bit vs 64-bit)
 #if defined(AML32) || defined(__arm__) || !defined(__LP64__)
@@ -307,9 +332,10 @@ void SaveMoneyConfig()
         entryInfinite->SetBool(bDynamicInfiniteMoney);
         entryForce->SetBool(bForceExactMoney);
         if (entryAimAssist) entryAimAssist->SetBool(bAimAssistHead);
+        if (entryInfiniteAmmo) entryInfiniteAmmo->SetBool(bInfiniteAmmo);
         pConfig->Save();
-        logger->Info("Konfigurasi disimpan: Target=%d, Dynamic=%d, Force=%d, AimAssist=%d",
-                     targetMoney, bDynamicInfiniteMoney, bForceExactMoney, bAimAssistHead);
+        logger->Info("Konfigurasi disimpan: Target=%d, Dynamic=%d, Force=%d, AimAssist=%d, InfiniteAmmo=%d",
+                     targetMoney, bDynamicInfiniteMoney, bForceExactMoney, bAimAssistHead, bInfiniteAmmo);
         bConfigSavedNotice = true;
     }
 }
@@ -567,6 +593,81 @@ void QueueGodModeCheat()
     bGodModeActive = !bGodModeActive;
     g_QueuedGodModeCheat.store(true);
     SetFeedback(bGodModeActive ? ">> God Mode: AKTIF (0x3C1AB0)!" : ">> God Mode: NONAKTIF (0x3C1AB0)!");
+}
+
+void ExecuteWantedCheat(int level)
+{
+    uintptr_t localPlayer = GetLocalPlayerPtr();
+    uintptr_t playerPed = localPlayer ? *(uintptr_t*)(localPlayer + OFFSET_PED) : 0;
+
+    if (level == 6)
+    {
+        if (playerPed && CPlayerPed_CheatWantedLevel)
+        {
+            CPlayerPed_CheatWantedLevel(playerPed, 6);
+            logger->Info("[Cheat] CPlayerPed::CheatWantedLevel(6) dieksekusi di Main Thread.");
+        }
+        else if (CCheat_WantedCheat)
+        {
+            CCheat_WantedCheat();
+            logger->Info("[Cheat] CCheat::WantedCheat (0x3C2B04) dieksekusi di Main Thread.");
+        }
+    }
+    else if (level == 0)
+    {
+        if (playerPed && CPlayerPed_CheatWantedLevel)
+        {
+            CPlayerPed_CheatWantedLevel(playerPed, 0);
+            logger->Info("[Cheat] CPlayerPed::CheatWantedLevel(0) dieksekusi di Main Thread.");
+        }
+        if (CCheat_NotWantedCheat)
+        {
+            CCheat_NotWantedCheat();
+            logger->Info("[Cheat] CCheat::NotWantedCheat (0x3C2ACC) dieksekusi di Main Thread.");
+        }
+    }
+}
+
+void QueueWantedLevel(int level)
+{
+    if (!IsPlayerInGame())
+    {
+        SetFeedback(">> Gagal: Player belum di dalam gameplay!");
+        return;
+    }
+    g_QueuedWantedLevel.store(level);
+    if (level == 6)
+    {
+        SetFeedback(">> Polisi Bintang 6 Aktif: Buronan Utama Kota!");
+    }
+    else
+    {
+        SetFeedback(">> Bintang Polisi Dihilangkan: Bebas Dari Polisi!");
+    }
+}
+
+void ApplyInfiniteAmmo(uintptr_t playerPed)
+{
+    if (!bInfiniteAmmo || !playerPed) return;
+
+    #if !defined(AML32) && !defined(__arm__) && defined(__LP64__)
+    uintptr_t pWeapons = playerPed + 0x730;
+    size_t wepSize = 32;
+    #else
+    uintptr_t pWeapons = playerPed + 0x5A0;
+    size_t wepSize = 28;
+    #endif
+
+    for (int i = 0; i < 13; ++i)
+    {
+        uintptr_t w = pWeapons + (i * wepSize);
+        int type = *(int*)(w + 0);
+        if (type >= 16 && type <= 43)
+        {
+            *(uint32_t*)(w + 8) = 999;   // m_nAmmoInClip (no reload needed!)
+            *(uint32_t*)(w + 12) = 9999; // m_nAmmoTotal
+        }
+    }
 }
 
 // -------------------------------------------------------------
@@ -837,6 +938,12 @@ bool Hooked_CWeapon_Fire(uintptr_t thisWeapon, uintptr_t pFiringEntity, CVector*
             // Catat tembakan untuk menampilkan indikator aim hip-fire
             g_HipFireDisplayTimer = 22;
 
+            if (bInfiniteAmmo)
+            {
+                *(uint32_t*)(thisWeapon + 8) = 999;
+                *(uint32_t*)(thisWeapon + 12) = 9999;
+            }
+
             uintptr_t target = pTargetEntity;
             if (!target || !IsPedAliveSafe(target))
             {
@@ -863,11 +970,24 @@ bool Hooked_CWeapon_Fire(uintptr_t thisWeapon, uintptr_t pFiringEntity, CVector*
         }
     }
 
+    bool res = false;
     if (Orig_CWeapon_Fire)
     {
-        return Orig_CWeapon_Fire(thisWeapon, pFiringEntity, pSource, pTarget, pTargetEntity, a6, a7);
+        res = Orig_CWeapon_Fire(thisWeapon, pFiringEntity, pSource, pTarget, pTargetEntity, a6, a7);
     }
-    return false;
+
+    if (bInfiniteAmmo && pFiringEntity)
+    {
+        uintptr_t localPlayer = GetLocalPlayerPtr();
+        uintptr_t playerPed = localPlayer ? *(uintptr_t*)(localPlayer + OFFSET_PED) : 0;
+        if (pFiringEntity == playerPed)
+        {
+            *(uint32_t*)(thisWeapon + 8) = 999;
+            *(uint32_t*)(thisWeapon + 12) = 9999;
+        }
+    }
+
+    return res;
 }
 
 // -------------------------------------------------------------
@@ -1135,7 +1255,7 @@ enum MainMenuAction
     ACTION_CLOSE_MENU = 4
 };
 
-const int TOTAL_MENU_ITEMS = 7;
+const int TOTAL_MENU_ITEMS = 10;
 const int MAX_ITEMS_PER_PAGE = 10; // Mendukung pagination otomatis jika menu melebihi 10 item!
 
 // -------------------------------------------------------------
@@ -1155,8 +1275,6 @@ void DrawNativeFloatingMenu()
         g_ScreenHeight = (float)pRsGlobal->maximumHeight;
     }
 
-    bool inGame = IsPlayerInGame();
-    int32_t curMoney = inGame ? GetCurrentPlayerMoney() : 0;
     float scaleRatio = g_ScreenHeight / 1080.0f;
     if (scaleRatio < 0.65f) scaleRatio = 0.65f;
     if (scaleRatio > 1.35f) scaleRatio = 1.35f;
@@ -1172,7 +1290,7 @@ void DrawNativeFloatingMenu()
     if (!bNativeMenuOpen)
     {
         DrawBorderedBox(btnLeft, btnTop, btnRight, btnBottom, CRGBA(10, 16, 26, 235), CRGBA(255, 215, 0, 255), 2.5f * scaleRatio);
-        DrawTextAt(btnLeft + (24.0f * scaleRatio), btnTop + (13.0f * scaleRatio), "[+] CHEAT MENU (AML)", 1.20f * scaleRatio, CRGBA(255, 230, 80, 255));
+        DrawTextAt(btnLeft + (24.0f * scaleRatio), btnTop + (13.0f * scaleRatio), "[+] MOD MENU (AML)", 1.20f * scaleRatio, CRGBA(255, 230, 80, 255));
     }
     else
     {
@@ -1194,13 +1312,13 @@ void DrawNativeFloatingMenu()
 
         bool hasPagination = (TOTAL_MENU_ITEMS > MAX_ITEMS_PER_PAGE);
 
-        float menuW = 620.0f * scaleRatio;
-        float itemH = 50.0f * scaleRatio;
-        float itemGap = 8.0f * scaleRatio;
-        float headerH = 50.0f * scaleRatio;
-        float subH = 36.0f * scaleRatio;
-        float bottomPadding = (hasPagination ? 75.0f : 35.0f) * scaleRatio;
-        float menuH = headerH + subH + (itemsOnPage * (itemH + itemGap)) + bottomPadding + (g_FeedbackTimer > 0 ? 30.0f * scaleRatio : 0.0f);
+        float menuW = 630.0f * scaleRatio;
+        float itemH = 46.0f * scaleRatio;
+        float itemGap = 6.0f * scaleRatio;
+        float headerH = 48.0f * scaleRatio;
+        float subH = 34.0f * scaleRatio;
+        float bottomPadding = (hasPagination ? 75.0f : 28.0f) * scaleRatio;
+        float menuH = headerH + subH + (itemsOnPage * (itemH + itemGap)) + bottomPadding + (g_FeedbackTimer > 0 ? 28.0f * scaleRatio : 0.0f);
 
         float menuX = (g_ScreenWidth - menuW) * 0.5f;
         float menuY = (g_ScreenHeight - menuH) * 0.5f;
@@ -1210,61 +1328,89 @@ void DrawNativeFloatingMenu()
 
         // Header Title Bar
         DrawFilledBox(menuX, menuY, menuX + menuW, menuY + headerH, CRGBA(25, 85, 45, 255));
-        DrawTextAt(menuX + (25.0f * scaleRatio), menuY + (12.0f * scaleRatio), "--- CHEAT SUITE & RESMI (AML) ---", 1.20f * scaleRatio, CRGBA(255, 255, 255, 255));
+        DrawTextAt(menuX + (25.0f * scaleRatio), menuY + (12.0f * scaleRatio), "--- MOD MENU (AML) ---", 1.20f * scaleRatio, CRGBA(255, 255, 255, 255));
 
-        // Subtitle Status & Uang
-        char subBuf[128];
-        snprintf(subBuf, sizeof(subBuf), "CJ: $%d | Target: $%d | %s", curMoney, targetMoney, inGame ? "In-Game" : "Menu");
-        DrawTextAt(menuX + (25.0f * scaleRatio), menuY + headerH + (7.0f * scaleRatio), subBuf, 1.05f * scaleRatio, inGame ? CRGBA(120, 255, 140, 255) : CRGBA(255, 180, 70, 255));
+        // Subtitle Credit Modded By nexus dengan Animasi Jalan Bergerak & RGB Rainbow
+        float subBoxLeft = menuX + (12.0f * scaleRatio);
+        float subBoxRight = menuX + menuW - (12.0f * scaleRatio);
+        float subBoxTop = menuY + headerH;
+        float subBoxBottom = subBoxTop + subH;
 
-        // Pemisah garis
-        DrawFilledBox(menuX + (12.0f * scaleRatio), menuY + headerH + subH, menuX + menuW - (12.0f * scaleRatio), menuY + headerH + subH + (2.0f * scaleRatio), CRGBA(255, 215, 0, 180));
+        DrawFilledBox(subBoxLeft, subBoxTop + (2.0f * scaleRatio), subBoxRight, subBoxBottom - (2.0f * scaleRatio), CRGBA(8, 14, 22, 220));
 
-        // Label & Gaya Dinamis Tombol Menu
+        // Animasi jalan bergerak bolak-balik halus di dalam kotak subtitle
+        float minTextX = subBoxLeft + (15.0f * scaleRatio);
+        float maxTextX = subBoxRight - (195.0f * scaleRatio);
+        if (maxTextX < minTextX) maxTextX = minTextX;
+
+        float marqueeWave = sinf((float)GetCurrentTimeMs() * 0.0022f) * 0.5f + 0.5f;
+        float animatedX = minTextX + marqueeWave * (maxTextX - minTextX);
+
+        CRGBA rgbCreditColor = GetRainbowColor(0.0035f, 0.0f);
+        DrawTextAt(animatedX, subBoxTop + (6.0f * scaleRatio), "★ Modded By nexus ★", 1.10f * scaleRatio, rgbCreditColor);
+
+        // Pemisah garis beraksen RGB Rainbow
+        DrawFilledBox(subBoxLeft, subBoxBottom, subBoxRight, subBoxBottom + (2.0f * scaleRatio), rgbCreditColor);
+
+        // Label & Gaya Dinamis Tombol Menu (10 Items)
+        char ammoLabel[64];
+        snprintf(ammoLabel, sizeof(ammoLabel), "[2] AMUNISI TAK TERBATAS: [%s]", bInfiniteAmmo ? "AKTIF" : "NONAKTIF");
         char aimLabel[64];
-        snprintf(aimLabel, sizeof(aimLabel), "[4] AIM ASSIST HEAD: [%s]", bAimAssistHead ? "AKTIF" : "NONAKTIF");
+        snprintf(aimLabel, sizeof(aimLabel), "[5] AIM ASSIST HEAD: [%s]", bAimAssistHead ? "AKTIF" : "NONAKTIF");
         char godLabel[64];
-        snprintf(godLabel, sizeof(godLabel), "[6] GOD MODE / INVINCIBLE: [%s]", bGodModeActive ? "AKTIF" : "NONAKTIF");
+        snprintf(godLabel, sizeof(godLabel), "[9] GOD MODE / INVINCIBLE: [%s]", bGodModeActive ? "AKTIF" : "NONAKTIF");
 
-        const char* itemLabels[7] = {
+        const char* itemLabels[10] = {
             "[1] MENU CHEAT SENJATA (WEAPONS KIT)",
-            "[2] SET UANG (INPUT MANUAL NOMINAL)",
-            "[3] CHEAT RESMI: HEALTH, ARMOR & UANG",
+            ammoLabel,
+            "[3] SET UANG (INPUT MANUAL NOMINAL)",
+            "[4] CHEAT RESMI: HEALTH, ARMOR & UANG",
             aimLabel,
-            "[5] CHEAT JETPACK (SPAWN JETPACK)",
+            "[6] POLISI BINTANG 6 (WANTED 6 STARS)",
+            "[7] HILANGKAN BINTANG (CLEAR WANTED)",
+            "[8] CHEAT JETPACK (SPAWN JETPACK)",
             godLabel,
             "[X] TUTUP MENU"
         };
-        CRGBA itemBgs[7] = {
+        CRGBA itemBgs[10] = {
             CRGBA(20, 45, 75, 235),
+            bInfiniteAmmo ? CRGBA(22, 68, 36, 235) : CRGBA(38, 42, 54, 235),
             CRGBA(25, 40, 60, 235),
             CRGBA(20, 50, 32, 235),
             bAimAssistHead ? CRGBA(22, 68, 36, 235) : CRGBA(38, 42, 54, 235),
+            CRGBA(65, 25, 30, 235),
+            CRGBA(20, 45, 55, 235),
             CRGBA(45, 30, 65, 235),
             bGodModeActive ? CRGBA(75, 25, 25, 235) : CRGBA(42, 38, 50, 235),
             CRGBA(55, 22, 22, 235)
         };
-        CRGBA itemBorders[7] = {
+        CRGBA itemBorders[10] = {
             CRGBA(100, 200, 255, 230),
+            bInfiniteAmmo ? CRGBA(80, 255, 130, 240) : CRGBA(140, 155, 175, 200),
             CRGBA(255, 215, 0, 230),
             CRGBA(60, 225, 105, 230),
             bAimAssistHead ? CRGBA(80, 255, 130, 240) : CRGBA(140, 155, 175, 200),
+            CRGBA(255, 100, 80, 230),
+            CRGBA(80, 220, 255, 230),
             CRGBA(190, 120, 255, 230),
             bGodModeActive ? CRGBA(255, 80, 80, 240) : CRGBA(160, 140, 190, 200),
             CRGBA(225, 70, 70, 230)
         };
-        CRGBA itemTextColors[7] = {
+        CRGBA itemTextColors[10] = {
             CRGBA(180, 230, 255, 255),
+            bInfiniteAmmo ? CRGBA(120, 255, 160, 255) : CRGBA(210, 220, 235, 255),
             CRGBA(255, 235, 120, 255),
             CRGBA(140, 255, 160, 255),
             bAimAssistHead ? CRGBA(120, 255, 160, 255) : CRGBA(210, 220, 235, 255),
+            CRGBA(255, 180, 180, 255),
+            CRGBA(180, 245, 255, 255),
             CRGBA(230, 190, 255, 255),
             bGodModeActive ? CRGBA(255, 160, 160, 255) : CRGBA(220, 210, 240, 255),
             CRGBA(255, 130, 130, 255)
         };
 
         // Daftar Tombol Aksi Menu Sesuai Halaman Aktif
-        float startY = menuY + headerH + subH + (12.0f * scaleRatio);
+        float startY = menuY + headerH + subH + (10.0f * scaleRatio);
         float itemLeft = menuX + (20.0f * scaleRatio);
         float itemRight = menuX + menuW - (20.0f * scaleRatio);
 
@@ -1280,7 +1426,7 @@ void DrawNativeFloatingMenu()
             CRGBA border = isPressed ? CRGBA(255, 255, 255, 255) : itemBorders[globalIndex];
 
             DrawBorderedBox(itemLeft, rowTop, itemRight, rowBottom, bg, border, 2.0f * scaleRatio);
-            DrawTextAt(itemLeft + (20.0f * scaleRatio), rowTop + (12.0f * scaleRatio), itemLabels[globalIndex], 1.15f * scaleRatio, itemTextColors[globalIndex]);
+            DrawTextAt(itemLeft + (20.0f * scaleRatio), rowTop + (11.0f * scaleRatio), itemLabels[globalIndex], 1.10f * scaleRatio, itemTextColors[globalIndex]);
         }
 
         // Pagination Bar jika item menu melebihi MAX_ITEMS_PER_PAGE (10)
@@ -1587,13 +1733,13 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
 
             bool hasPagination = (TOTAL_MENU_ITEMS > MAX_ITEMS_PER_PAGE);
 
-            float menuW = 600.0f * scaleRatio;
-            float itemH = 52.0f * scaleRatio;
-            float itemGap = 10.0f * scaleRatio;
-            float headerH = 50.0f * scaleRatio;
-            float subH = 36.0f * scaleRatio;
-            float bottomPadding = (hasPagination ? 75.0f : 35.0f) * scaleRatio;
-            float menuH = headerH + subH + (itemsOnPage * (itemH + itemGap)) + bottomPadding + (g_FeedbackTimer > 0 ? 30.0f * scaleRatio : 0.0f);
+            float menuW = 630.0f * scaleRatio;
+            float itemH = 46.0f * scaleRatio;
+            float itemGap = 6.0f * scaleRatio;
+            float headerH = 48.0f * scaleRatio;
+            float subH = 34.0f * scaleRatio;
+            float bottomPadding = (hasPagination ? 75.0f : 28.0f) * scaleRatio;
+            float menuH = headerH + subH + (itemsOnPage * (itemH + itemGap)) + bottomPadding + (g_FeedbackTimer > 0 ? 28.0f * scaleRatio : 0.0f);
 
             float menuX = (g_ScreenWidth - menuW) * 0.5f;
             float menuY = (g_ScreenHeight - menuH) * 0.5f;
@@ -1602,7 +1748,7 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
 
             if (insideWindow)
             {
-                float startY = menuY + headerH + subH + (12.0f * scaleRatio);
+                float startY = menuY + headerH + subH + (10.0f * scaleRatio);
                 float itemLeft = menuX + (20.0f * scaleRatio);
                 float itemRight = menuX + menuW - (20.0f * scaleRatio);
 
@@ -1651,18 +1797,25 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
                             g_CurrentMenuScreen = SCREEN_WEAPONS_MENU;
                             g_FeedbackTimer = 0;
                         }
-                        else if (g_PressedItem == 1) // [2] SET UANG
+                        else if (g_PressedItem == 1) // [2] AMUNISI TAK TERBATAS
+                        {
+                            bInfiniteAmmo = !bInfiniteAmmo;
+                            SaveMoneyConfig();
+                            SetFeedback(bInfiniteAmmo ? ">> Amunisi Tak Terbatas: AKTIF (999/9999)!" : ">> Amunisi Tak Terbatas: NONAKTIF!");
+                            logger->Info("Infinite Ammo diubah: %d", bInfiniteAmmo);
+                        }
+                        else if (g_PressedItem == 2) // [3] SET UANG
                         {
                             g_CurrentMenuScreen = SCREEN_MANUAL_SET_MONEY;
                             int32_t cMoney = GetCurrentPlayerMoney();
                             g_ManualInputMoney = (cMoney > 0) ? (int64_t)cMoney : (int64_t)targetMoney;
                             g_FeedbackTimer = 0;
                         }
-                        else if (g_PressedItem == 2) // [3] CHEAT RESMI
+                        else if (g_PressedItem == 3) // [4] CHEAT RESMI
                         {
                             QueueOfficialCheat();
                         }
-                        else if (g_PressedItem == 3) // [4] AIM ASSIST HEAD
+                        else if (g_PressedItem == 4) // [5] AIM ASSIST HEAD
                         {
                             bAimAssistHead = !bAimAssistHead;
                             ApplyAimAssistPatches(bAimAssistHead);
@@ -1670,15 +1823,23 @@ bool ProcessNativeMenuTouch(int actionType, int trackNum, float x, float y)
                             SetFeedback(bAimAssistHead ? ">> Aim Assist Head: DIAKTIFKAN!" : ">> Aim Assist Head: DINONAKTIFKAN!");
                             logger->Info("Aim Assist Head diubah: %d", bAimAssistHead);
                         }
-                        else if (g_PressedItem == 4) // [5] CHEAT JETPACK
+                        else if (g_PressedItem == 5) // [6] POLISI BINTANG 6
+                        {
+                            QueueWantedLevel(6);
+                        }
+                        else if (g_PressedItem == 6) // [7] HILANGKAN BINTANG
+                        {
+                            QueueWantedLevel(0);
+                        }
+                        else if (g_PressedItem == 7) // [8] CHEAT JETPACK
                         {
                             QueueJetpackCheat();
                         }
-                        else if (g_PressedItem == 5) // [6] GOD MODE
+                        else if (g_PressedItem == 8) // [9] GOD MODE
                         {
                             QueueGodModeCheat();
                         }
-                        else if (g_PressedItem == 6) // [X] TUTUP MENU
+                        else if (g_PressedItem == 9) // [X] TUTUP MENU
                         {
                             bNativeMenuOpen = false;
                             g_CurrentMenuScreen = SCREEN_MAIN_MENU;
@@ -2200,6 +2361,11 @@ void RenderImGuiMenuContent()
         QueueJetpackCheat();
     }
 
+    if (pImGui->Checkbox("Amunisi Tak Terbatas (Infinite Ammo)", &bInfiniteAmmo))
+    {
+        SaveMoneyConfig();
+    }
+
     if (pImGui->Checkbox("Aim Assist Headshot (Auto Head Lock)", &bAimAssistHead))
     {
         ApplyAimAssistPatches(bAimAssistHead);
@@ -2209,6 +2375,18 @@ void RenderImGuiMenuContent()
     if (pImGui->Checkbox("God Mode / Invincible (0x3C1AB0)", &bGodModeActive))
     {
         QueueGodModeCheat();
+    }
+
+    pImGui->Separator();
+    pImGui->TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Polisi & Wanted Level:");
+    if (pImGui->Button("Polisi Bintang 6 (Wanted 6 Stars)", ImVec2(pImGui->GetScaledX(240), 0)))
+    {
+        QueueWantedLevel(6);
+    }
+    pImGui->SameLine();
+    if (pImGui->Button("Hilangkan Bintang (Clear Wanted)", ImVec2(pImGui->GetScaledX(240), 0)))
+    {
+        QueueWantedLevel(0);
     }
 
     pImGui->Separator();
@@ -2278,6 +2456,11 @@ void Hooked_CGame_Process()
     {
         ExecuteGodModeCheat();
     }
+    int pendingWanted = g_QueuedWantedLevel.exchange(-1);
+    if (pendingWanted >= 0)
+    {
+        ExecuteWantedCheat(pendingWanted);
+    }
 
     if (!bImGuiInitialized)
     {
@@ -2298,6 +2481,7 @@ void Hooked_CGame_Process()
     if (playerPed != 0)
     {
         ApplyMoneyToPlayer(localPlayer);
+        ApplyInfiniteAmmo(playerPed);
     }
     else
     {
@@ -2340,15 +2524,17 @@ extern "C" void OnModLoad()
         entryInfinite = pConfig->Bind("DynamicInfiniteMoney", bDynamicInfiniteMoney, "MoneyCheat");
         entryForce = pConfig->Bind("ForceExactMoney", bForceExactMoney, "MoneyCheat");
         entryAimAssist = pConfig->Bind("AimAssistHead", bAimAssistHead, "AimAssist");
+        entryInfiniteAmmo = pConfig->Bind("InfiniteAmmo", bInfiniteAmmo, "Cheat");
 
         if (entryTarget) targetMoney = entryTarget->GetInt();
         if (entryInfinite) bDynamicInfiniteMoney = entryInfinite->GetBool();
         if (entryForce) bForceExactMoney = entryForce->GetBool();
         if (entryAimAssist) bAimAssistHead = entryAimAssist->GetBool();
+        if (entryInfiniteAmmo) bInfiniteAmmo = entryInfiniteAmmo->GetBool();
 
         pConfig->Save();
-        logger->Info("Konfigurasi dimuat: TargetMoney=%d, Dynamic=%d, Force=%d, AimAssist=%d",
-                     targetMoney, bDynamicInfiniteMoney, bForceExactMoney, bAimAssistHead);
+        logger->Info("Konfigurasi dimuat: TargetMoney=%d, Dynamic=%d, Force=%d, AimAssist=%d, InfiniteAmmo=%d",
+                     targetMoney, bDynamicInfiniteMoney, bForceExactMoney, bAimAssistHead, bInfiniteAmmo);
     }
 
     ApplyAimAssistPatches(bAimAssistHead);
@@ -2381,6 +2567,9 @@ extern "C" void OnModLoad()
         const uintptr_t OFF_SKILLS      = 0x2C0BE8;
         const uintptr_t OFF_JETPACK     = 0x2C09C0;
         const uintptr_t OFF_INVINCIBLE  = 0x2BF8E4;
+        const uintptr_t OFF_WANTED      = 0x2C0A58; // _ZN6CCheat11WantedCheatEv
+        const uintptr_t OFF_NOTWANTED   = 0x2C0A20; // _ZN6CCheat14NotWantedCheatEv
+        const uintptr_t OFF_PLR_WANTED  = 0x454F68; // _ZN10CPlayerPed16CheatWantedLevelEi
         const uintptr_t OFF_GIVEWEAPON  = 0x43D698;
         const uintptr_t OFF_REQMODEL    = 0x286398; // _ZN10CStreaming12RequestModelEii
         const uintptr_t OFF_LOADMODELS  = 0x287CF0; // _ZN10CStreaming22LoadAllRequestedModelsEb
@@ -2392,6 +2581,9 @@ extern "C" void OnModLoad()
         const uintptr_t OFF_SKILLS      = 0x3C2E90; // _ZN6CCheat17WeaponSkillsCheatEv
         const uintptr_t OFF_JETPACK     = 0x3C2A40; // _ZN6CCheat12JetpackCheatEv
         const uintptr_t OFF_INVINCIBLE  = 0x3C1AB0; // _ZN6CCheat25TogglePlayerInvincibilityEv
+        const uintptr_t OFF_WANTED      = 0x3C2B04; // _ZN6CCheat11WantedCheatEv
+        const uintptr_t OFF_NOTWANTED   = 0x3C2ACC; // _ZN6CCheat14NotWantedCheatEv
+        const uintptr_t OFF_PLR_WANTED  = 0x5C7700; // _ZN10CPlayerPed16CheatWantedLevelEi
         const uintptr_t OFF_GIVEWEAPON  = 0x59525C; // _ZN4CPed10GiveWeaponE11eWeaponTypejb
         const uintptr_t OFF_REQMODEL    = 0x3949E0; // _ZN10CStreaming12RequestModelEii
         const uintptr_t OFF_LOADMODELS  = 0x396B28; // _ZN10CStreaming22LoadAllRequestedModelsEb
@@ -2422,6 +2614,9 @@ extern "C" void OnModLoad()
     CCheat_WeaponSkillsCheat = (CCheat_WeaponSkillsCheat_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat17WeaponSkillsCheatEv", OFF_SKILLS);
     CCheat_JetpackCheat = (CCheat_JetpackCheat_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat12JetpackCheatEv", OFF_JETPACK);
     CCheat_TogglePlayerInvincibility = (CCheat_TogglePlayerInvincibility_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat25TogglePlayerInvincibilityEv", OFF_INVINCIBLE);
+    CCheat_WantedCheat = (CCheat_WantedCheat_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat11WantedCheatEv", OFF_WANTED);
+    CCheat_NotWantedCheat = (CCheat_NotWantedCheat_fn)ResolveCheatFunc(pGTASA, "_ZN6CCheat14NotWantedCheatEv", OFF_NOTWANTED);
+    CPlayerPed_CheatWantedLevel = (CPlayerPed_CheatWantedLevel_fn)ResolveCheatFunc(pGTASA, "_ZN10CPlayerPed16CheatWantedLevelEi", OFF_PLR_WANTED);
     CPed_GiveWeapon = (CPed_GiveWeapon_fn)ResolveCheatFunc(pGTASA, "_ZN4CPed10GiveWeaponE11eWeaponTypejb", OFF_GIVEWEAPON);
     CStreaming_RequestModel = (CStreaming_RequestModel_fn)ResolveCheatFunc(pGTASA, "_ZN10CStreaming12RequestModelEii", OFF_REQMODEL);
     CStreaming_LoadAllRequestedModels = (CStreaming_LoadAllRequestedModels_fn)ResolveCheatFunc(pGTASA, "_ZN10CStreaming22LoadAllRequestedModelsEb", OFF_LOADMODELS);
