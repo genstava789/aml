@@ -733,10 +733,24 @@ void ApplyAimAssistPatches(bool enable)
     #if !defined(AML32) && !defined(__arm__) && defined(__LP64__)
     if (pGTASA && aml)
     {
+        // 1. Patch CCam::Process_AimWeapon pitch (0x4A6678)
+        // Menjaga sudut pitch kamera stabil mengarah ke kepala target di semua jarak
         uintptr_t pSubPitch = pGTASA + 0x4A6678;
-        uint32_t val = enable ? 0xD503201F : 0x1E21394A;
-        aml->Write(pSubPitch, (uintptr_t)&val, sizeof(val));
-        logger->Info("Patch CCam::Process_AimWeapon pitch (0x4A6678) diset ke: 0x%08X (enable=%d)", val, enable);
+        uint32_t valPitch = enable ? 0xD503201F : 0x1E21394A;
+        aml->Write(pSubPitch, (uintptr_t)&valPitch, sizeof(valPitch));
+
+        // 2. Patch CHud::DrawCrossHairs (0x51C778 & 0x51C7F4)
+        // Perbaiki visual bug: memunculkan kembali crosshair bawaan game pada mode free-aim di GTA SA Android!
+        uintptr_t pCrosshairCheck = pGTASA + 0x51C778;
+        uint32_t valCrosshair = 0xD503201F; // NOP (TBZ W8, #3, loc_51C860)
+        aml->Write(pCrosshairCheck, (uintptr_t)&valCrosshair, sizeof(valCrosshair));
+
+        uintptr_t pCrosshairForce = pGTASA + 0x51C7F4;
+        uint32_t valForce = 0x52800038; // MOV W24, #1
+        aml->Write(pCrosshairForce, (uintptr_t)&valForce, sizeof(valForce));
+
+        logger->Info("Patch aim & crosshair diaplikasikan: pSubPitch=0x%08X (enable=%d), pCrosshair=0x%08X, pForce=0x%08X",
+                     valPitch, enable, valCrosshair, valForce);
     }
     #endif
 }
@@ -928,9 +942,7 @@ void Hooked_CPed_GetBonePosition(uintptr_t pPed, CVector& outPosn, unsigned int 
 
 void Hooked_CPedIK_PointGunAtPosition(uintptr_t thisIK, const CVector& pos, float factor)
 {
-    // Hanya arahkan senjata ke kepala jika player sedang dalam mode aim kamera aktif (IsPlayerInNativeAimMode()).
-    // Biarkan hip fire dan free aim bawaan game tanpa disentuh sama sekali!
-    if (bAimAssistHead && IsPlayerInGame() && IsPlayerInNativeAimMode())
+    if (bAimAssistHead && IsPlayerInGame())
     {
         uintptr_t localPlayer = GetLocalPlayerPtr();
         if (localPlayer)
@@ -947,6 +959,15 @@ void Hooked_CPedIK_PointGunAtPosition(uintptr_t thisIK, const CVector& pos, floa
                 if (thisIK == playerIK)
                 {
                     uintptr_t targetPed = GetPlayerTargetedPed(playerPed);
+                    if (!targetPed || !IsPedAliveSafe(targetPed))
+                    {
+                        // Jika sedang hip-fire (tidak sedang lock kamera), cari target musuh di hadapan player
+                        if (!IsPlayerInNativeAimMode())
+                        {
+                            targetPed = FindBestTargetInFrontOfPlayer(playerPed, 70.0f);
+                        }
+                    }
+
                     if (targetPed && IsPedAliveSafe(targetPed))
                     {
                         CPed_GetBonePosition_fn getBone = Orig_CPed_GetBonePosition ? Orig_CPed_GetBonePosition : CPed_GetBonePosition;
@@ -987,14 +1008,22 @@ bool Hooked_CWeapon_Fire(uintptr_t thisWeapon, uintptr_t pFiringEntity, CVector*
 
         if (pFiringEntity == playerPed)
         {
-            // Cuma tambahkan saat player sedang membidik dengan kamera (aim kamera aktif).
-            // Biarkan hip fire dan free aim 100% bawaan game tanpa dimodifikasi sama sekali!
-            if (bAimAssistHead && IsPlayerInNativeAimMode())
+            if (bAimAssistHead)
             {
                 uintptr_t target = pTargetEntity;
                 if (!target || !IsPedAliveSafe(target))
                 {
                     target = GetPlayerTargetedPed(playerPed);
+                }
+
+                // Jika target belum terdeteksi (misal hip fire tanpa explicit lock),
+                // cari target musuh di hadapan player!
+                if (!target || !IsPedAliveSafe(target))
+                {
+                    if (!IsPlayerInNativeAimMode())
+                    {
+                        target = FindBestTargetInFrontOfPlayer(playerPed, 70.0f);
+                    }
                 }
 
                 if (target && IsPedAliveSafe(target))
@@ -1008,7 +1037,7 @@ bool Hooked_CWeapon_Fire(uintptr_t thisWeapon, uintptr_t pFiringEntity, CVector*
                         {
                             if (pTarget)
                             {
-                                *pTarget = headPos; // Arahkan peluru langsung ke KEPALA saat aim kamera!
+                                *pTarget = headPos; // Arahkan peluru langsung ke KEPALA di semua jarak (dekat maupun jauh)!
                             }
                             pTargetEntity = target;
                         }
