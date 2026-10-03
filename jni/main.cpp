@@ -887,9 +887,25 @@ uintptr_t FindBestTargetInFrontOfPlayer(uintptr_t playerPed, float maxDistance =
     return bestPed;
 }
 
+inline bool IsPlayerInNativeAimMode()
+{
+    if (!pTheCamera) return false;
+    #if !defined(AML32) && !defined(__arm__) && defined(__LP64__)
+    uint8_t activeCam = *(uint8_t*)(pTheCamera + 0x5F);
+    uintptr_t camPtr = pTheCamera + (activeCam * 0x228);
+    uint16_t mode = *(uint16_t*)(camPtr + 0x186);
+    return (mode == 53 || mode == 55 || mode == 65); // MODE_AIMWEAPON, MODE_SNIPER, MODE_ROCKETLAUNCHER
+    #else
+    return false;
+    #endif
+}
+
 void Hooked_CPed_GetBonePosition(uintptr_t pPed, CVector& outPosn, unsigned int boneTag, bool bCalledFromCamera)
 {
-    if (bAimAssistHead && pPed != 0)
+    // Hanya alihkan target ke BONE_HEAD (8) jika dipanggil oleh aim kamera (bCalledFromCamera == true).
+    // Jika bCalledFromCamera == false (misalnya hip fire atau free aim), biarkan koordinat torso (bone 3)
+    // bawaan game tanpa diubah sama sekali agar hip fire tidak macet dan 100% lancar!
+    if (bAimAssistHead && pPed != 0 && bCalledFromCamera)
     {
         uintptr_t localPlayer = GetLocalPlayerPtr();
         uintptr_t playerPed = localPlayer ? *(uintptr_t*)(localPlayer + OFFSET_PED) : 0;
@@ -897,9 +913,6 @@ void Hooked_CPed_GetBonePosition(uintptr_t pPed, CVector& outPosn, unsigned int 
         // Hanya modifikasi jika ped ini BUKAN player (CJ) itu sendiri dan ped masih hidup
         if (pPed != playerPed && IsPedAliveSafe(pPed))
         {
-            // GTA SA secara default selalu meminta koordinat torso (bone 3) atau pelvis/spine/neck (bone 1-5)
-            // saat lock-on aiming (touch tap atau gamepad/joystick) dan perhitungan tembakan (termasuk hip-fire).
-            // Alihkan koordinat sasaran secara instan ke BONE_HEAD (8)!
             if (boneTag >= 1 && boneTag <= 5)
             {
                 boneTag = 8; // BONE_HEAD
@@ -915,7 +928,9 @@ void Hooked_CPed_GetBonePosition(uintptr_t pPed, CVector& outPosn, unsigned int 
 
 void Hooked_CPedIK_PointGunAtPosition(uintptr_t thisIK, const CVector& pos, float factor)
 {
-    if (bAimAssistHead && IsPlayerInGame())
+    // Hanya arahkan senjata ke kepala jika player sedang dalam mode aim kamera aktif (IsPlayerInNativeAimMode()).
+    // Biarkan hip fire dan free aim bawaan game tanpa disentuh sama sekali!
+    if (bAimAssistHead && IsPlayerInGame() && IsPlayerInNativeAimMode())
     {
         uintptr_t localPlayer = GetLocalPlayerPtr();
         if (localPlayer)
@@ -972,10 +987,9 @@ bool Hooked_CWeapon_Fire(uintptr_t thisWeapon, uintptr_t pFiringEntity, CVector*
 
         if (pFiringEntity == playerPed)
         {
-            // Catat tembakan untuk menampilkan indikator aim hip-fire secara konsisten
-            g_HipFireDisplayTimer = 22;
-
-            if (bAimAssistHead)
+            // Cuma tambahkan saat player sedang membidik dengan kamera (aim kamera aktif).
+            // Biarkan hip fire dan free aim 100% bawaan game tanpa dimodifikasi sama sekali!
+            if (bAimAssistHead && IsPlayerInNativeAimMode())
             {
                 uintptr_t target = pTargetEntity;
                 if (!target || !IsPedAliveSafe(target))
@@ -994,7 +1008,7 @@ bool Hooked_CWeapon_Fire(uintptr_t thisWeapon, uintptr_t pFiringEntity, CVector*
                         {
                             if (pTarget)
                             {
-                                *pTarget = headPos; // Arahkan peluru langsung ke KEPALA!
+                                *pTarget = headPos; // Arahkan peluru langsung ke KEPALA saat aim kamera!
                             }
                             pTargetEntity = target;
                         }
@@ -1044,19 +1058,6 @@ inline bool IsPlayerWeaponFiring(uintptr_t playerPed)
     uintptr_t pWeapon = playerPed + 0x730 + (activeSlot * 32);
     uint32_t state = *(uint32_t*)(pWeapon + 4);
     return (state == 1); // WEAPONSTATE_FIRING
-    #else
-    return false;
-    #endif
-}
-
-inline bool IsPlayerInNativeAimMode()
-{
-    if (!pTheCamera) return false;
-    #if !defined(AML32) && !defined(__arm__) && defined(__LP64__)
-    uint8_t activeCam = *(uint8_t*)(pTheCamera + 0x5F);
-    uintptr_t camPtr = pTheCamera + (activeCam * 0x228);
-    uint16_t mode = *(uint16_t*)(camPtr + 0x186);
-    return (mode == 53 || mode == 55 || mode == 65); // MODE_AIMWEAPON, MODE_SNIPER, MODE_ROCKETLAUNCHER
     #else
     return false;
     #endif
@@ -1351,7 +1352,7 @@ void DrawNativeFloatingMenu()
         DrawFilledBox(menuX, menuY, menuX + menuW, menuY + headerH, CRGBA(25, 85, 45, 255));
         DrawTextAt(menuX + (25.0f * scaleRatio), menuY + (12.0f * scaleRatio), "--- MOD MENU (AML) ---", 1.20f * scaleRatio, CRGBA(255, 255, 255, 255));
 
-        // Subtitle Credit Modded By nexus dengan Animasi Iklan TV (Berjalan Pelan Sampai Menghilang Lalu Muncul Kembali Secara Loop)
+        // Subtitle Credit Modded By nexus dengan Animasi Iklan TV (Muncul dari kiri, bergerak ke kanan sampai menghilang, lalu loop)
         float subBoxLeft = menuX + (12.0f * scaleRatio);
         float subBoxRight = menuX + menuW - (12.0f * scaleRatio);
         float subBoxTop = menuY + headerH;
@@ -1359,32 +1360,43 @@ void DrawNativeFloatingMenu()
 
         DrawFilledBox(subBoxLeft, subBoxTop + (2.0f * scaleRatio), subBoxRight, subBoxBottom - (2.0f * scaleRatio), CRGBA(8, 14, 22, 220));
 
-        // Animasi pelan TV commercial marquee: bergerak kontinu dari kanan ke kiri sampai menghilang total, lalu loop
-        uint32_t cycleDurationMs = 8000; // 8.0 detik per siklus loop (tenang & elegan)
+        // Animasi iklan TV bergerak pelan dari KIRI ke KANAN tanpa keluar dari container
+        uint32_t cycleDurationMs = 7000; // 7.0 detik per siklus loop (tenang & elegan)
         float t = (float)(GetCurrentTimeMs() % cycleDurationMs) / (float)cycleDurationMs; // 0.0f -> 1.0f
 
-        float textWidthEst = 195.0f * scaleRatio;
-        float startX = subBoxRight + (10.0f * scaleRatio);
-        float endX = subBoxLeft - textWidthEst - (10.0f * scaleRatio);
-        float animatedX = startX - t * (startX - endX);
+        float innerLeft = subBoxLeft + (14.0f * scaleRatio);
+        float innerRight = subBoxRight - (14.0f * scaleRatio);
+        float textWidth = 185.0f * scaleRatio;
+        float maxTravel = (innerRight - innerLeft) - textWidth;
+        if (maxTravel < 10.0f * scaleRatio) maxTravel = 10.0f * scaleRatio;
 
-        // Efek fade-in halus saat baru muncul di kanan, dan fade-out saat keluar/menghilang di kiri
-        float alphaF = 1.0f;
-        if (animatedX < subBoxLeft + (40.0f * scaleRatio))
+        // Posisi teks bergerak dari kiri (innerLeft) ke kanan (innerLeft + maxTravel)
+        float animatedX = innerLeft + (t * maxTravel);
+
+        // Fade in dari kiri saat muncul, tetap solid di tengah, fade out di kanan sampai menghilang total
+        float alphaF = 0.0f;
+        if (t < 0.16f)
         {
-            float dist = animatedX - (subBoxLeft - textWidthEst);
-            alphaF = dist / (textWidthEst + (40.0f * scaleRatio));
+            alphaF = t / 0.16f; // Fade in saat baru muncul dari kiri
         }
-        else if (animatedX > subBoxRight - (50.0f * scaleRatio))
+        else if (t < 0.68f)
         {
-            float dist = (subBoxRight + (10.0f * scaleRatio)) - animatedX;
-            alphaF = dist / (60.0f * scaleRatio);
+            alphaF = 1.0f; // Jelas terlihat di tengah container
         }
+        else if (t < 0.90f)
+        {
+            alphaF = (0.90f - t) / 0.22f; // Fade out sampai menghilang sebelum batas kanan
+        }
+        else
+        {
+            alphaF = 0.0f; // Menghilang sempurna sebelum loop berikutnya
+        }
+
         if (alphaF < 0.0f) alphaF = 0.0f;
         if (alphaF > 1.0f) alphaF = 1.0f;
 
         uint8_t alpha = (uint8_t)(alphaF * 255.0f);
-        if (alpha > 5)
+        if (alpha > 3)
         {
             CRGBA rgbCreditColor = GetRainbowColor(0.0025f, 0.0f);
             rgbCreditColor.a = alpha;
@@ -2217,7 +2229,6 @@ void Hooked_CHud_DrawAfterFade()
     if (CHud_DrawAfterFade) CHud_DrawAfterFade();
     if (IsPlayerInGame())
     {
-        ProcessAndDrawHipFireCrosshair();
         DrawNativeFloatingMenu();
     }
 }
